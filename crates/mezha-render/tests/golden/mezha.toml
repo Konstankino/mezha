@@ -1,0 +1,8 @@
+[project]
+name = "golden"
+
+[policy]
+sandbox = true
+egress_allow = ["github.com", "crates.io"]
+permissions_ask = ["git push", "terraform apply"]
+deny_reads = [".env", "*.pem", "secrets/**"]

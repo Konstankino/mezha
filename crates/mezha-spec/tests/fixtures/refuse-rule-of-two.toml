@@ -1,0 +1,10 @@
+# An agent with all three Rule of Two properties and no human_gate.
+[project]
+name = "rule-of-two"
+
+[policy]
+permissions_ask = ["git push"]
+
+[agent.researcher]
+tools = ["Read", "WebFetch", "Bash(git push *)"]
+rule_of_two = ["untrusted_input", "private_data", "external_action"]

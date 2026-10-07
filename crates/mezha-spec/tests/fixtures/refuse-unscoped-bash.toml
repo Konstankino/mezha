@@ -1,0 +1,11 @@
+# A command skill that may run any command.
+[project]
+name = "unscoped-bash"
+
+[policy]
+permissions_ask = ["git push"]
+
+[skill.release]
+preset = "command"
+description = "Cut a release. Use when the user asks to release or tag a version."
+allowed_tools = ["Bash(cargo test *)", "Bash"]

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Third-party actions are pinned to commit SHAs (the version is in the
+# trailing comment); nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, os: macos-latest }
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: linux-arm64, os: ubuntu-24.04-arm }
+          - { name: windows-native, os: windows-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Clippy on every platform, so cfg(windows) and cfg(unix) code is linted.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # --no-fail-fast: report every failing test binary, not just the first.
+      - name: Test
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
+
+  # Windows with WSL2: the sandbox (and so the boundary) exists here, unlike
+  # native Windows. Built on the Linux file system, since /mnt is slow.
+  wsl2:
+    name: test (windows-wsl2)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: build-essential curl git ca-certificates
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - name: Test
+        run: |
+          . "$HOME/.cargo/env"
+          cp -r . "$HOME/mezha"
+          cd "$HOME/mezha"
+          export CARGO_TARGET_DIR="$HOME/target"
+          cargo test --workspace --all-targets --locked --no-fail-fast
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # The workspace declares rust-version = 1.88; keep it true.
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check --workspace --all-targets --locked

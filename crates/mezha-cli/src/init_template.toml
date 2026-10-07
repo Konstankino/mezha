@@ -1,0 +1,41 @@
+# mezha.toml: the single source for this project's .claude/ setup.
+# Edit this file, then run `mezha compile`. Files mezha generates are
+# fingerprinted; hand edits to them are kept and reported, never overwritten
+# silently.
+
+[project]
+name = "{{name}}"
+os_mode = "{{os_mode}}"        # full (macOS, Linux, WSL2) | native-windows
+# check = "cargo test --workspace"
+# languages = { instructions = "English", answers = "English" }
+
+[policy]
+# The sandbox is the boundary: with it off, every gate is advisory.
+sandbox = true
+# Hosts sandboxed commands may reach. Empty means no network for them.
+egress_allow = []
+# Commands that need a permission prompt and an active `mezha approve`.
+permissions_ask = ["git push"]
+# Files agents may not read (gitignore patterns; a bare name matches at any depth).
+deny_reads = [".env", "*.pem", "*.key"]
+
+# [memory]
+# dream_schedule = "manual"    # nightly | manual | cron
+# default_scope = "project"    # project | local | user
+# phi_repos = []               # repos whose agent memory must stay local
+
+# Agents, skills and rules are validated now and rendered in a later release.
+#
+# [agent.implementer]
+# model = "sonnet"
+# tools = ["Read", "Edit", "Write", "Bash(cargo *)"]
+# rule_of_two = ["untrusted_input", "private_data"]  # at most two of three
+# max_turns = 60
+#
+# [skill.rust-conventions]
+# preset = "knowledge"
+# description = "Error handling and test conventions for this workspace. Use when writing Rust code."
+# paths = ["**/*.rs"]
+#
+# [rule.terraform]
+# paths = ["infra/**/*.tf"]

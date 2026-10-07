@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "mezha hook approval-gate --protocol 1 --gate 'git push' --gate 'terraform apply' || exit 2",
+            "shell": "bash",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "ask": [
+      "Bash(git push *)",
+      "Bash(terraform apply *)",
+      "Edit(/mezha.toml)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)",
+      "Edit(/.claude/.mezha-state.json)",
+      "Bash(mezha compile *)",
+      "Bash(mezha apply *)",
+      "Bash(mezha init *)"
+    ],
+    "deny": [
+      "Bash(mezha approve *)",
+      "Edit(~/.mezha/**)",
+      "Read(.env)",
+      "Read(*.pem)",
+      "Read(secrets/**)"
+    ]
+  },
+  "sandbox": {
+    "allowUnsandboxedCommands": false,
+    "enabled": true,
+    "failIfUnavailable": true,
+    "filesystem": {
+      "denyWrite": [
+        "~/.mezha",
+        "./mezha.toml",
+        "./.claude/.mezha-state.json"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "crates.io"
+      ]
+    }
+  }
+}

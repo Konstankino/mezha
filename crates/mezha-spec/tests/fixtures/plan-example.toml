@@ -1,0 +1,49 @@
+[project]
+name = "client-x"
+os_mode = "full"            # full | native-windows
+check = "cargo test --workspace"
+languages = { instructions = "English", answers = "Ukrainian" }
+
+[policy]
+sandbox = true
+egress_allow = ["github.com", "crates.io", "pypi.org"]
+permissions_ask = ["git push", "terraform apply", "docker push"]
+deny_reads = [".env", "*.pem", "*.key", "*.tfstate"]
+
+[memory]
+dream_schedule = "nightly"    # nightly | manual | cron
+default_scope = "project"
+phi_repos = ["client-x-phi"]  # для них scope = local, очищення обовʼязкове
+
+[agent.implementer]
+model = "sonnet"
+tools = ["Read", "Edit", "Write", "Bash(cargo *)"]
+skills = ["rust-conventions", "db-migrations"]
+rule_of_two = ["untrusted_input", "private_data"]   # external_action заборонено компілятором
+memory = { scope = "project", class = "no-phi" }
+max_turns = 60
+
+[agent.adversary]
+model = "opus"
+effort = "high"
+tools = ["Read", "Grep", "Glob", "Bash(cargo test *)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit"]
+rule_of_two = ["untrusted_input", "private_data"]
+memory = { scope = "project", dream_policy = "attack-patterns-only" }
+max_turns = 40
+
+[skill.rust-conventions]
+preset = "knowledge"
+description = "Error handling, logging and test conventions for this Rust workspace. Use when writing, changing or reviewing Rust code."
+paths = ["**/*.rs", "Cargo.toml"]
+user_invocable = false
+
+[skill.release]
+preset = "command"
+description = "Cut a release: checks, version bump, changelog, git tag. Use when the user asks to release or tag a version."
+arguments = ["version"]
+allowed_tools = ["Bash(cargo clippy *)", "Bash(cargo test *)", "Bash(git describe *)", "Bash(git tag *)"]
+
+[rule.terraform]
+paths = ["infra/**/*.tf"]
+max_lines = 30

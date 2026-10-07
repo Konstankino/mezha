@@ -1,0 +1,11 @@
+# PHI memory with project scope would commit patient data to the repository.
+[project]
+name = "phi-project"
+
+[policy]
+permissions_ask = ["git push"]
+
+[agent.implementer]
+tools = ["Read", "Edit"]
+rule_of_two = ["private_data"]
+memory = { scope = "project", class = "phi" }

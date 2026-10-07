@@ -1,0 +1,192 @@
+//! The approval gate: a PreToolUse hook on every tool. Gated commands need an
+//! active `mezha approve`, the agent may not approve itself, and no tool may
+//! touch `~/.mezha`. Anything it can't make sense of is blocked.
+
+use std::path::{Component, Path, PathBuf};
+
+use mezha_broker::approvals;
+use mezha_spec::CommandPrefix;
+use serde_json::{Map, Value};
+
+use crate::matcher::{self, Hit};
+use crate::{Env, MAX_INPUT, Outcome};
+
+pub const NAME: &str = "approval-gate";
+
+/// Tools whose input carries a shell command.
+const COMMAND_TOOLS: [&str; 3] = ["Bash", "PowerShell", "Monitor"];
+
+/// `tool_input` keys that name a file or directory.
+const PATH_KEYS: [&str; 3] = ["file_path", "notebook_path", "path"];
+
+const ADVISORY: &str = "(mezha approval gate: advisory. The boundary is the sandbox and the credentials it withholds.)";
+
+pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
+    if input.len() > MAX_INPUT {
+        return Outcome::block("mezha: hook input is too large to check");
+    }
+    let Ok(text) = std::str::from_utf8(input) else {
+        return Outcome::block("mezha: hook input is not UTF-8");
+    };
+    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(text) else {
+        return Outcome::block("mezha: hook input is not a JSON object");
+    };
+    let event_name = event.get("hook_event_name").and_then(Value::as_str);
+    if event_name != Some("PreToolUse") {
+        return Outcome::block(format!(
+            "mezha: {NAME} handles PreToolUse events, not {}",
+            event_name.unwrap_or("an event without hook_event_name")
+        ));
+    }
+    let Some(tool) = event.get("tool_name").and_then(Value::as_str) else {
+        return Outcome::block("mezha: PreToolUse event without tool_name");
+    };
+    let Some(home) = mezha_broker::home_dir(|k| env.var(k).map(str::to_string)) else {
+        return Outcome::block("mezha: can't find the home directory (HOME is unset)");
+    };
+    let project = project_dir(env, &event);
+    let input = event.get("tool_input").and_then(Value::as_object);
+
+    if let Some(blocked) = input.and_then(|i| store_path(i, &home, project.as_deref())) {
+        return Outcome::block(format!(
+            "mezha: `{blocked}` is inside {}, where approvals live; agents may not touch it.",
+            approvals::mezha_home(&home).display()
+        ));
+    }
+
+    match input.and_then(|i| i.get("command")) {
+        Some(Value::String(command)) => {
+            gate_command(command, gates, env, &home, project.as_deref())
+        }
+        Some(_) => Outcome::block("mezha: tool_input.command is not a string"),
+        None if COMMAND_TOOLS.contains(&tool) => {
+            Outcome::block(format!("mezha: {tool} call without a command"))
+        }
+        None => Outcome::allow(),
+    }
+}
+
+/// `CLAUDE_PROJECT_DIR`, else the event's `cwd`.
+fn project_dir(env: &Env, event: &Map<String, Value>) -> Option<PathBuf> {
+    env.var("CLAUDE_PROJECT_DIR")
+        .or_else(|| {
+            event
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+        })
+        .map(PathBuf::from)
+}
+
+fn gate_command(
+    command: &str,
+    gates: &[CommandPrefix],
+    env: &Env,
+    home: &Path,
+    project: Option<&Path>,
+) -> Outcome {
+    if command
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return Outcome::block(
+            "mezha: the command contains control characters, so it can't be checked",
+        );
+    }
+    match matcher::scan(command, gates) {
+        None => Outcome::allow(),
+        Some(Hit::TooDeep) => {
+            Outcome::block("mezha: the command nests too deeply to check, so it is blocked")
+        }
+        Some(Hit::SelfApproval) => Outcome::block(format!(
+            "mezha: `mezha approve` must be run by a human in their own terminal, not by the agent.\n{ADVISORY}"
+        )),
+        Some(Hit::Gate(i)) => {
+            let Some(project) = project else {
+                return Outcome::block("mezha: no project directory (CLAUDE_PROJECT_DIR or cwd)");
+            };
+            let root = mezha_broker::repo_root(project);
+            if approvals::remaining(home, &root, env.now).is_some() {
+                Outcome::allow()
+            } else {
+                Outcome::block(format!(
+                    "mezha: `{}` needs a human approval first. Ask the user to run \
+                     `mezha approve --minutes 30` in their own terminal (not through Claude), \
+                     then try again.\n{ADVISORY}",
+                    gates[i]
+                ))
+            }
+        }
+    }
+}
+
+/// The first path in the tool input that points into `~/.mezha`.
+fn store_path<'a>(
+    input: &'a Map<String, Value>,
+    home: &Path,
+    project: Option<&Path>,
+) -> Option<&'a str> {
+    let store = resolve(&approvals::mezha_home(home));
+    PATH_KEYS
+        .iter()
+        .filter_map(|k| input.get(*k).and_then(Value::as_str))
+        .find(|p| {
+            let path = if *p == "~" {
+                home.to_path_buf()
+            } else if let Some(rest) = p.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                match project {
+                    Some(dir) => dir.join(p),
+                    None => PathBuf::from(p),
+                }
+            };
+            within(&resolve(&path), &store)
+        })
+}
+
+/// Removes `.` and `..` without touching the disk, then resolves symlinks in
+/// the longest prefix that exists.
+fn resolve(path: &Path) -> PathBuf {
+    let mut lexical = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            other => lexical.push(other),
+        }
+    }
+    let mut existing = lexical.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            let mut full = canonical;
+            full.extend(missing.iter().rev());
+            return full;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return lexical,
+        }
+    }
+}
+
+fn within(path: &Path, dir: &Path) -> bool {
+    let norm = |p: &Path| {
+        let s = p.to_string_lossy().replace('\\', "/");
+        let s = s.strip_prefix("//?/").map(str::to_string).unwrap_or(s);
+        if cfg!(any(target_os = "macos", windows)) {
+            s.to_lowercase()
+        } else {
+            s
+        }
+    };
+    let (path, dir) = (norm(path), norm(dir));
+    let dir = dir.trim_end_matches('/');
+    path == dir || path.starts_with(&format!("{dir}/"))
+}
