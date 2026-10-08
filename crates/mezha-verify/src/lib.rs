@@ -5,14 +5,16 @@
 //! configuration and what is known about the sandbox on each platform. The
 //! one thing it asks a server is branch protection, through the user's
 //! `gh`, with queries only. `--probe` adds side-effect-free probes inside
-//! `srt` ([`probe`]). verify never runs a credential helper or a program an
-//! agent could have put on PATH ([`Ctx::which_trusted`]).
+//! `srt` ([`probe`]), and `--inside` looks from inside Claude Code's own
+//! sandbox instead ([`inside`]). verify never runs a credential helper or a
+//! program an agent could have put on PATH ([`Ctx::which_trusted`]).
 
 mod checks;
 pub mod creds;
 pub mod ctx;
 pub mod gitcfg;
 pub mod hosts;
+pub mod inside;
 pub mod layers;
 pub mod probe;
 pub mod report;
@@ -31,6 +33,8 @@ pub struct Options {
     pub project_only: bool,
     /// Also run side-effect-free probes inside `srt` (`--probe`).
     pub probe: bool,
+    /// Look from inside Claude Code's sandbox instead (`--inside`).
+    pub inside: bool,
 }
 
 /// Why verify couldn't produce a report at all (exit code 2).
@@ -40,6 +44,8 @@ pub enum CantRun {
     Spec(String),
     /// `--probe` was asked for and can't run.
     Probe(String),
+    /// `--inside` can't run here.
+    Inside(String),
 }
 
 impl std::fmt::Display for CantRun {
@@ -48,6 +54,7 @@ impl std::fmt::Display for CantRun {
             CantRun::NoSpec(path) => write!(f, "{path} not found (run `mezha init`)"),
             CantRun::Spec(why) => write!(f, "{why}"),
             CantRun::Probe(why) => write!(f, "--probe can't run: {why}"),
+            CantRun::Inside(why) => write!(f, "--inside can't run: {why}"),
         }
     }
 }
@@ -68,6 +75,9 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         )));
     }
     let rendered = mezha_render::render(&spec, &text).map_err(|e| CantRun::Spec(e.to_string()))?;
+    if opts.inside {
+        return verify_inside(ctx, opts);
+    }
 
     let layers = layers::Layers::load(ctx, opts.project_only);
     let ctx = &Ctx {
@@ -167,6 +177,45 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
             "full"
         },
         probe: prepared.as_ref().map(probe::Prepared::runtime),
+        checks,
+        summary: Default::default(),
+        notes,
+    };
+    report.summarize();
+    report.redact();
+    Ok(report)
+}
+
+/// `--inside`: only what can be seen from inside the sandbox.
+fn verify_inside(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
+    if !cfg!(unix) {
+        return Err(CantRun::Inside("it runs on macOS and Linux only".into()));
+    }
+    if opts.project_only || opts.probe {
+        return Err(CantRun::Inside(
+            "it doesn't go with --project-only or --probe".into(),
+        ));
+    }
+    if ctx.var("CLAUDECODE").is_none() {
+        return Err(CantRun::Inside(
+            "it is for Claude to run with its Bash tool, inside the sandbox. Ask Claude to run `mezha verify --inside`; from your own terminal, use `mezha verify --probe`".into(),
+        ));
+    }
+    let layers = layers::Layers::load(ctx, false);
+    let ctx = &Ctx {
+        agent_writable: layers.agent_writable(ctx),
+        ..ctx.clone()
+    };
+    let git = gitcfg::GitConfig::read(ctx, false).ok();
+    let (checks, notes) = inside::checks(ctx, &layers, git.as_ref());
+    let mut report = Report {
+        version: report::JSON_VERSION,
+        mezha: env!("CARGO_PKG_VERSION"),
+        hook_protocol: mezha_hooks::PROTOCOL,
+        platform: ctx.platform.as_str(),
+        claude_code: None,
+        mode: "inside",
+        probe: None,
         checks,
         summary: Default::default(),
         notes,

@@ -3,7 +3,9 @@
 //! forge through the user's own `gh`, with queries only (GraphQL and GET):
 //!
 //! - GraphQL `refUpdateRule` shows classic protection, `viewerPermission`
-//!   what the user's token may do;
+//!   what the user's token may do; for an admin, `branchProtectionRule`
+//!   adds whether the rule binds admins and who may bypass it (hidden from
+//!   everyone else);
 //! - `rules/branches/{b}` shows the rules of active rulesets, and
 //!   `rulesets/{id}` whether the user can bypass each;
 //! - `codeowners/errors` shows whether a valid CODEOWNERS file exists.
@@ -33,6 +35,17 @@ const MAX_RULESETS: usize = 10;
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 const QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerPermission defaultBranchRef { name refUpdateRule { requiredApprovingReviewCount requiresCodeOwnerReviews allowsForcePushes allowsDeletions viewerCanPush } } } }";
+
+/// Asked only by an admin, and on its own, so a field an older server
+/// lacks can't wipe out the main answer.
+const ADMIN_QUERY: &str = "query($owner: String!, $name: String!) { viewer { login } repository(owner: $owner, name: $name) { defaultBranchRef { branchProtectionRule { isAdminEnforced requiresApprovingReviews requiresCodeOwnerReviews lockBranch restrictsPushes pushAllowances(first: 100) { nodes { actor { __typename ... on User { login } ... on Team { slug organization { login } } } } } bypassPullRequestAllowances(first: 100) { nodes { actor { __typename ... on User { login } ... on Team { slug organization { login } } } } } } } } }";
+
+/// The viewer's teams in one organization, for allowance lists that name
+/// teams.
+const TEAMS_QUERY: &str = "query($org: String!, $me: String!) { organization(login: $org) { teams(userLogins: [$me], first: 100) { nodes { slug } } } }";
+
+/// The oldest GitHub Enterprise Server still supported (2026-10).
+const OLDEST_GHES: (u32, u32) = (3, 18);
 
 /// Ruleset rule types that stop a direct push to the branch.
 const BLOCKING_RULES: [&str; 3] = ["pull_request", "update", "merge_queue"];
@@ -268,6 +281,12 @@ impl Repo {
         })
     }
 
+    /// GitHub Enterprise Server: neither github.com nor a `*.ghe.com`
+    /// (data residency) host.
+    pub fn is_ghes(&self) -> bool {
+        self.host != "github.com" && !self.host.ends_with(".ghe.com")
+    }
+
     pub fn label(&self) -> String {
         if self.host == "github.com" {
             format!("{}/{}", self.owner, self.name)
@@ -303,7 +322,8 @@ fn encode(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhOut {
     Ok(String),
-    NotFound,
+    /// A 404, with the JSON body gh printed.
+    NotFound(String),
     /// Exit 4: no login for the host.
     NotLoggedIn,
     /// Any other failure; GraphQL may still have printed partial data.
@@ -317,7 +337,7 @@ impl GhOut {
     fn why(&self) -> String {
         match self {
             GhOut::Ok(_) => String::new(),
-            GhOut::NotFound => "not found".into(),
+            GhOut::NotFound(_) => "not found".into(),
             GhOut::NotLoggedIn => "gh isn't logged in".into(),
             GhOut::Failed { why, .. } => why.clone(),
         }
@@ -339,8 +359,14 @@ fn gh_api(ctx: &Ctx, gh: &Path, cwd: &Path, host: &str, enterprise: bool, args: 
         "GH_REPO",
         "GH_HOST",
     ];
-    if !enterprise {
+    // gh sends GH_TOKEN only to github.com and *.ghe.com, and enterprise
+    // tokens only to GHES hosts; drop what this host never needs.
+    let tenancy = host.ends_with(".ghe.com");
+    if host == "github.com" || tenancy || !enterprise {
         remove.extend(["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
+    }
+    if host != "github.com" && !tenancy {
+        remove.extend(["GH_TOKEN", "GITHUB_TOKEN"]);
     }
     let out = run(
         ctx,
@@ -372,12 +398,21 @@ fn gh_api(ctx: &Ctx, gh: &Path, cwd: &Path, host: &str, enterprise: bool, args: 
         },
         Ok(o) if o.code == Some(0) => GhOut::Ok(o.stdout),
         Ok(o) if o.code == Some(4) => GhOut::NotLoggedIn,
-        Ok(o) if o.stderr.contains("(HTTP 404)") => GhOut::NotFound,
+        Ok(o) if o.stderr.contains("(HTTP 404)") => GhOut::NotFound(o.stdout),
         Ok(o) => GhOut::Failed {
             why: first_line(&o.stderr),
             stdout: o.stdout,
         },
     }
+}
+
+/// A 404 for a route the server doesn't have, rather than for a missing
+/// resource: its `documentation_url` points at no section.
+fn route_missing(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["documentation_url"].as_str().map(|u| !u.contains('#')))
+        .unwrap_or(false)
 }
 
 fn first_line(text: &str) -> String {
@@ -413,6 +448,87 @@ pub struct Ruleset {
     pub bypass: Option<String>,
 }
 
+/// Who an allowance list names: user logins, and teams as
+/// (organization, slug). Apps don't push as the user, so they're left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Actors {
+    pub users: Vec<String>,
+    pub teams: Vec<(String, String)>,
+}
+
+impl Actors {
+    fn read(list: &Value) -> Actors {
+        let mut actors = Actors::default();
+        for node in list["nodes"].as_array().into_iter().flatten() {
+            let actor = &node["actor"];
+            match actor["__typename"].as_str() {
+                Some("User") => actors
+                    .users
+                    .extend(actor["login"].as_str().map(str::to_string)),
+                Some("Team") => {
+                    if let (Some(org), Some(slug)) = (
+                        actor["organization"]["login"].as_str(),
+                        actor["slug"].as_str(),
+                    ) {
+                        actors.teams.push((org.to_string(), slug.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        actors
+    }
+
+    /// Whether `viewer` is on the list: `None` when a team names it and
+    /// the viewer's teams are unknown.
+    fn names(&self, viewer: &str, teams: Option<&[(String, String)]>) -> Option<bool> {
+        if self.users.iter().any(|u| u.eq_ignore_ascii_case(viewer)) {
+            return Some(true);
+        }
+        if self.teams.is_empty() {
+            return Some(false);
+        }
+        let mine = teams?;
+        Some(self.teams.iter().any(|(org, slug)| {
+            mine.iter()
+                .any(|(o, s)| o.eq_ignore_ascii_case(org) && s.eq_ignore_ascii_case(slug))
+        }))
+    }
+}
+
+/// The classic rule from GraphQL `branchProtectionRule`, which only admins
+/// can read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdminRule {
+    pub viewer: String,
+    /// "Do not allow bypassing the above settings".
+    pub enforced: bool,
+    pub requires_pr: bool,
+    pub code_owners: bool,
+    pub lock: bool,
+    pub restricts: bool,
+    pub push: Actors,
+    pub bypass_pr: Actors,
+}
+
+impl AdminRule {
+    fn read(text: &str) -> Option<AdminRule> {
+        let v: Value = serde_json::from_str(text).ok()?;
+        let rule = &v["data"]["repository"]["defaultBranchRef"]["branchProtectionRule"];
+        let flag = |key: &str| rule[key].as_bool();
+        Some(AdminRule {
+            viewer: v["data"]["viewer"]["login"].as_str()?.to_string(),
+            enforced: flag("isAdminEnforced")?,
+            requires_pr: flag("requiresApprovingReviews")?,
+            code_owners: flag("requiresCodeOwnerReviews")?,
+            lock: flag("lockBranch")?,
+            restricts: flag("restrictsPushes")?,
+            push: Actors::read(&rule["pushAllowances"]),
+            bypass_pr: Actors::read(&rule["bypassPullRequestAllowances"]),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CodeOwners {
     #[default]
@@ -435,6 +551,13 @@ pub struct Facts {
     /// The rulesets that could be read, by id.
     pub rulesets: BTreeMap<u64, Ruleset>,
     pub codeowners: CodeOwners,
+    /// The classic rule as an admin sees it; asked only by admins.
+    pub admin: Option<AdminRule>,
+    /// The viewer's teams, as (organization, slug), in the organizations an
+    /// allowance list names; `None` if they couldn't be read.
+    pub viewer_teams: Option<Vec<(String, String)>>,
+    /// A GitHub Enterprise Server's `installed_version`.
+    pub server_version: Option<String>,
     pub not_logged_in: bool,
     /// What went wrong on the way, for the message.
     pub problems: Vec<String>,
@@ -526,15 +649,29 @@ pub fn gather(repo: &Repo, gh: &mut dyn FnMut(&[&str]) -> GhOut) -> Facts {
             facts.read_graphql(&stdout);
             facts.problems.push(why);
         }
-        GhOut::NotFound => facts.problems.push("the repository wasn't found".into()),
+        GhOut::NotFound(_) => facts.problems.push("the repository wasn't found".into()),
     }
     let Some(Some(branch)) = facts.branch.clone() else {
         return facts;
     };
+    if repo.is_ghes()
+        && let GhOut::Ok(text) = gh(&["--method", "GET", "meta"])
+    {
+        facts.server_version = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["installed_version"].as_str().map(str::to_string));
+    }
+    if facts.permission.as_deref() == Some("ADMIN") && matches!(facts.classic, Some(Some(_))) {
+        gather_admin(&[&owner, &name], gh, &mut facts);
+    }
     let base = format!("repos/{}/{}", repo.owner, repo.name);
     let rules = format!("{base}/rules/branches/{}", encode(&branch));
     match gh(&["--method", "GET", "--paginate", &rules]) {
         GhOut::Ok(text) => facts.rules = parse_rules(&text),
+        // A server without rulesets (GHES before 3.11) has none to apply.
+        GhOut::NotFound(body) if repo.is_ghes() && route_missing(&body) => {
+            facts.rules = Some(Vec::new())
+        }
         other => facts.problems.push(format!("rulesets: {}", other.why())),
     }
     let mut ids: Vec<u64> = facts
@@ -561,10 +698,68 @@ pub fn gather(repo: &Repo, gh: &mut dyn FnMut(&[&str]) -> GhOut) -> Facts {
                 0 => CodeOwners::Valid,
                 n => CodeOwners::Errors(n),
             }),
-        GhOut::NotFound => CodeOwners::Missing,
+        GhOut::NotFound(body) if route_missing(&body) => CodeOwners::Unknown,
+        GhOut::NotFound(_) => CodeOwners::Missing,
         _ => CodeOwners::Unknown,
     };
     facts
+}
+
+/// The admin-only view of the classic rule, and the viewer's teams when an
+/// allowance list names teams.
+fn gather_admin(vars: &[&str; 2], gh: &mut dyn FnMut(&[&str]) -> GhOut, facts: &mut Facts) {
+    let query = format!("query={ADMIN_QUERY}");
+    let out = gh(&["graphql", "-f", &query, "-f", vars[0], "-f", vars[1]]);
+    let GhOut::Ok(text) = out else {
+        facts
+            .problems
+            .push(format!("the admin view of the classic rule: {}", out.why()));
+        return;
+    };
+    let Some(rule) = AdminRule::read(&text) else {
+        return;
+    };
+    let mut orgs: Vec<&str> = rule
+        .push
+        .teams
+        .iter()
+        .chain(&rule.bypass_pr.teams)
+        .map(|(org, _)| org.as_str())
+        .collect();
+    orgs.sort_unstable();
+    orgs.dedup();
+    let mut teams = Some(Vec::new());
+    if !valid_name(&rule.viewer) {
+        teams = None;
+    }
+    for org in orgs {
+        let (Some(mine), true) = (teams.as_mut(), valid_name(org)) else {
+            teams = None;
+            break;
+        };
+        let query = format!("query={TEAMS_QUERY}");
+        let org_var = format!("org={org}");
+        let me = format!("me={}", rule.viewer);
+        let slugs = match gh(&["graphql", "-f", &query, "-f", &org_var, "-f", &me]) {
+            GhOut::Ok(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+                v["data"]["organization"]["teams"]["nodes"]
+                    .as_array()
+                    .map(|nodes| {
+                        nodes
+                            .iter()
+                            .filter_map(|n| n["slug"].as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+            }),
+            _ => None,
+        };
+        match slugs {
+            Some(slugs) => mine.extend(slugs.into_iter().map(|s| (org.to_string(), s))),
+            None => teams = None,
+        }
+    }
+    facts.viewer_teams = teams;
+    facts.admin = Some(rule);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,17 +832,24 @@ pub fn judge(facts: &Facts) -> Judgement {
     match &facts.classic {
         None => unknown.push("classic protection couldn't be read".into()),
         Some(None) => {}
+        Some(Some(c)) if permission == Some("ADMIN") => {
+            match &facts.admin {
+                Some(rule) => admin_blocks(rule, facts.viewer_teams.as_deref(), &mut blocks),
+                None => unknown.push("the admin view of the classic rule couldn't be read".into()),
+            }
+            if c.force_pushes == Some(true) {
+                j.warnings
+                    .push("the classic rule allows force pushes".into());
+            }
+        }
         Some(Some(c)) => {
+            // viewerCanPush ignores the pull-request requirement: false
+            // means push restrictions hold you back, true settles nothing.
             let reviews = c.required_reviews.is_some_and(|n| n >= 1);
             let owners = c.code_owners == Some(true);
             let held = can_write && c.viewer_can_push == Some(false);
-            let free = can_write && c.viewer_can_push == Some(true);
             if reviews || owners || held {
-                let bypass = if permission == Some("ADMIN") {
-                    Bypass::Yes("you are an admin, and classic protection lets admins push unless it is enforced for them".into())
-                } else if free {
-                    Bypass::Yes("the classic rule lets you push".into())
-                } else if permission.is_none() {
+                let bypass = if permission.is_none() {
                     Bypass::Unknown("your permission on the repository is unknown".into())
                 } else {
                     Bypass::No
@@ -656,9 +858,9 @@ pub fn judge(facts: &Facts) -> Judgement {
                     bypass,
                     code_owners: owners,
                 });
-            } else if !free {
+            } else {
                 unknown.push(
-                    "a classic rule requires 0 approvals, so whether it requires a pull request is unknown"
+                    "a classic rule requires 0 approvals, and only admins can see whether it requires a pull request"
                         .into(),
                 );
             }
@@ -706,6 +908,13 @@ pub fn judge(facts: &Facts) -> Judgement {
         }
     }
 
+    if let Some(version) = &facts.server_version
+        && parse_ghes(version).is_some_and(|v| v < OLDEST_GHES)
+    {
+        j.warnings.push(format!(
+            "GitHub Enterprise Server {version} is past end of support, so some answers may be missing"
+        ));
+    }
     let firm: Vec<&Block> = blocks.iter().filter(|b| b.bypass == Bypass::No).collect();
     for block in &blocks {
         if let Bypass::Unknown(why) = &block.bypass {
@@ -747,6 +956,63 @@ pub fn judge(facts: &Facts) -> Judgement {
     j
 }
 
+/// What an admin's classic rule blocks: with admins enforced, the
+/// pull-request requirement (unless you're on its bypass list), a lock,
+/// and push restrictions (unless you're on the push list); without, it
+/// blocks nothing an admin can't get past.
+fn admin_blocks(rule: &AdminRule, teams: Option<&[(String, String)]>, blocks: &mut Vec<Block>) {
+    if !(rule.requires_pr || rule.lock || rule.restricts) {
+        return;
+    }
+    if !rule.enforced {
+        blocks.push(Block {
+            bypass: Bypass::Yes(
+                "the classic rule isn't enforced for admins, and you are one".into(),
+            ),
+            code_owners: rule.code_owners,
+        });
+        return;
+    }
+    let listed = |actors: &Actors, yes: &str, unknown: &str| match actors.names(&rule.viewer, teams)
+    {
+        Some(true) => Bypass::Yes(yes.into()),
+        Some(false) => Bypass::No,
+        None => Bypass::Unknown(unknown.into()),
+    };
+    if rule.requires_pr {
+        blocks.push(Block {
+            bypass: listed(
+                &rule.bypass_pr,
+                "you are on the classic rule's pull-request bypass list",
+                "whether a team puts you on the classic rule's bypass list is unknown",
+            ),
+            code_owners: rule.code_owners,
+        });
+    }
+    if rule.lock {
+        blocks.push(Block {
+            bypass: Bypass::No,
+            code_owners: false,
+        });
+    }
+    if rule.restricts {
+        blocks.push(Block {
+            bypass: listed(
+                &rule.push,
+                "you are on the classic rule's push list",
+                "whether a team puts you on the classic rule's push list is unknown",
+            ),
+            code_owners: false,
+        });
+    }
+}
+
+/// `3.17.4` → (3, 17).
+fn parse_ghes(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 fn with_problems(unknown: &[String], facts: &Facts) -> String {
     let mut text = unknown.join("; ");
     if !facts.problems.is_empty() {
@@ -761,47 +1027,82 @@ mod tests {
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protection");
 
-    /// Serves recorded answers from `tests/fixtures/protection/<case>`,
-    /// after `edit` has had its way with them; a missing file is a 404.
-    fn facts_from(case: &str, edit: impl Fn(&str, String) -> String) -> Facts {
+    /// A 404 for a resource (its documentation_url names a section).
+    const NOT_FOUND: &str = r#"{"message":"Not Found","documentation_url":"https://docs.github.com/rest/x#y","status":"404"}"#;
+    /// A 404 for a route the server doesn't have.
+    const NO_ROUTE: &str = r#"{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}"#;
+
+    fn fixture_file(args: &[&str]) -> String {
+        let all = args.join(" ");
+        let path = args.last().unwrap();
+        if all.contains("branchProtectionRule") {
+            "admin.json".into()
+        } else if all.contains("userLogins") {
+            "teams.json".into()
+        } else if args[0] == "graphql" {
+            "graphql.json".into()
+        } else if path.contains("/rules/branches/") {
+            "rules.json".into()
+        } else if let Some(id) = path.split("/rulesets/").nth(1) {
+            format!("ruleset-{id}.json")
+        } else if *path == "meta" {
+            "meta.json".into()
+        } else {
+            "codeowners.json".into()
+        }
+    }
+
+    /// Serves recorded answers from `tests/fixtures/protection/<case>`
+    /// after `edit` (which may also invent files); `<name>.404.json` is a
+    /// recorded 404 body, and a file that exists nowhere is a plain 404.
+    fn facts_on(
+        host: &str,
+        case: &str,
+        edit: impl Fn(&str, Option<String>) -> Option<String>,
+    ) -> Facts {
         let repo = Repo {
-            host: "github.com".into(),
+            host: host.into(),
             owner: "o".into(),
             name: "r".into(),
         };
         let mut calls = Vec::new();
         let mut gh = |args: &[&str]| {
             calls.push(args.join(" "));
-            let path = args.last().unwrap();
-            let file = if args[0] == "graphql" {
-                "graphql.json".to_string()
-            } else if path.contains("/rules/branches/") {
-                "rules.json".to_string()
-            } else if let Some(id) = path.split("/rulesets/").nth(1) {
-                format!("ruleset-{id}.json")
-            } else {
-                "codeowners.json".to_string()
-            };
-            match std::fs::read_to_string(format!("{FIXTURES}/{case}/{file}")) {
-                Ok(text) => GhOut::Ok(edit(&file, text)),
-                Err(_) => GhOut::NotFound,
+            let file = fixture_file(args);
+            let read =
+                |name: &str| std::fs::read_to_string(format!("{FIXTURES}/{case}/{name}")).ok();
+            if let Some(text) = edit(&file, read(&file)) {
+                return GhOut::Ok(text);
             }
+            let missing = file.replace(".json", ".404.json");
+            GhOut::NotFound(edit(&missing, read(&missing)).unwrap_or_else(|| NOT_FOUND.to_string()))
         };
         let facts = gather(&repo, &mut gh);
         assert!(calls[0].starts_with("graphql -f query=query("), "{calls:?}");
         assert!(
-            calls.iter().skip(1).all(|c| c.starts_with("--method GET")),
+            calls
+                .iter()
+                .all(|c| c.starts_with("graphql -f query=") || c.starts_with("--method GET")),
             "{calls:?}"
         );
         facts
     }
 
-    fn as_writer(_: &str, text: String) -> String {
-        text.replace("\"READ\"", "\"WRITE\"")
+    fn verdict(case: &str, edit: impl Fn(&str, Option<String>) -> Option<String>) -> Judgement {
+        judge(&facts_on("github.com", case, edit))
     }
 
-    fn verdict(case: &str, edit: impl Fn(&str, String) -> String) -> Judgement {
-        judge(&facts_from(case, edit))
+    fn recorded(_: &str, text: Option<String>) -> Option<String> {
+        text
+    }
+
+    /// A WRITE user, as recorded READ answers would read for one without
+    /// push restrictions: viewerCanPush is true at WRITE.
+    fn as_writer(_: &str, text: Option<String>) -> Option<String> {
+        text.map(|t| {
+            t.replace("\"READ\"", "\"WRITE\"")
+                .replace("\"viewerCanPush\": false", "\"viewerCanPush\": true")
+        })
     }
 
     #[test]
@@ -813,8 +1114,16 @@ mod tests {
     }
 
     #[test]
+    fn viewer_can_push_is_not_a_bypass() {
+        // 1b read viewerCanPush: true as "the rule lets you push"; it only
+        // says push restrictions don't hold you back.
+        let j = verdict("cli-cli", as_writer);
+        assert!(!matches!(j.verdict, Verdict::Bypassable(_)), "{j:?}");
+    }
+
+    #[test]
     fn read_only_access_is_skipped() {
-        assert_eq!(verdict("cli-cli", |_, t| t).verdict, Verdict::ReadOnly);
+        assert_eq!(verdict("cli-cli", recorded).verdict, Verdict::ReadOnly);
     }
 
     #[test]
@@ -831,14 +1140,14 @@ mod tests {
     #[test]
     fn a_ruleset_you_can_bypass_does_not_protect() {
         let j = verdict("sandbox-runtime", |file, text| {
-            as_writer(file, text).replace("\"never\"", "\"always\"")
+            as_writer(file, text).map(|t| t.replace("\"never\"", "\"always\""))
         });
         assert!(
             matches!(&j.verdict, Verdict::Bypassable(why) if why.contains("(always)")),
             "{j:?}"
         );
         let j = verdict("sandbox-runtime", |file, text| {
-            as_writer(file, text).replace("\"never\"", "\"pull_requests_only\"")
+            as_writer(file, text).map(|t| t.replace("\"never\"", "\"pull_requests_only\""))
         });
         assert!(matches!(j.verdict, Verdict::WithoutCodeOwners(_)), "{j:?}");
     }
@@ -846,8 +1155,8 @@ mod tests {
     #[test]
     fn a_hidden_ruleset_is_unknown() {
         let j = verdict("sandbox-runtime", |file, text| {
-            if file.starts_with("ruleset-") {
-                "not json".into()
+            if file.starts_with("ruleset-") && file.ends_with(".json") && !file.contains("404") {
+                Some("not json".into())
             } else {
                 as_writer(file, text)
             }
@@ -861,7 +1170,7 @@ mod tests {
     #[test]
     fn an_inactive_ruleset_does_not_count() {
         let j = verdict("sandbox-runtime", |file, text| {
-            as_writer(file, text).replace("\"active\"", "\"evaluate\"")
+            as_writer(file, text).map(|t| t.replace("\"active\"", "\"evaluate\""))
         });
         assert_eq!(j.verdict, Verdict::Unprotected);
     }
@@ -875,21 +1184,27 @@ mod tests {
     }
 
     #[test]
-    fn nodejs_classic_with_zero_approvals_is_unknown() {
-        // The classic rule alone: 0 approvals, no code owners, and no
-        // viewerCanPush to settle it.
+    fn a_classic_rule_with_zero_approvals() {
+        // Alone, at WRITE: whether it requires a pull request is admin-only.
         let j = verdict("nodejs", |file, text| match file {
-            "rules.json" => "[]".into(),
-            _ => {
-                as_writer(file, text).replace("\"viewerCanPush\": false", "\"viewerCanPush\": null")
-            }
+            "rules.json" => Some("[]".into()),
+            _ => as_writer(file, text),
         });
         assert!(
-            matches!(&j.verdict, Verdict::Unknown(why) if why.contains("0 approvals")),
+            matches!(&j.verdict, Verdict::Unknown(why) if why.contains("only admins can see")),
             "{j:?}"
         );
         assert_eq!(j.warnings, ["the classic rule allows force pushes"]);
-        // viewerCanPush false at WRITE settles it; the ruleset adds no code owners.
+        // Push restrictions that hold you back (viewerCanPush false) block.
+        let j = verdict("nodejs", |file, text| match file {
+            "rules.json" => Some("[]".into()),
+            _ => text.map(|t| t.replace("\"READ\"", "\"WRITE\"")),
+        });
+        assert_eq!(
+            j.verdict,
+            Verdict::WithoutCodeOwners("no rule that binds you requires code-owner review".into())
+        );
+        // With nodejs's own pull_request ruleset, a ruleset binds you.
         let j = verdict("nodejs", as_writer);
         assert_eq!(
             j.verdict,
@@ -898,18 +1213,171 @@ mod tests {
     }
 
     #[test]
-    fn an_admin_bypasses_classic_protection() {
-        let j = verdict("cli-cli", |_, text| text.replace("\"READ\"", "\"ADMIN\""));
+    fn an_enforced_classic_rule_binds_an_admin() {
+        // Recorded: admins enforced, one approval, no CODEOWNERS.
+        let j = verdict("ocgen-guardrail-e2e", recorded);
+        assert_eq!(
+            j.verdict,
+            Verdict::WithoutCodeOwners("no rule that binds you requires code-owner review".into())
+        );
+        let j = verdict("ocgen-guardrail-e2e", |file, text| match file {
+            "admin.json" => text.map(|t| {
+                t.replace(
+                    "\"requiresCodeOwnerReviews\": false",
+                    "\"requiresCodeOwnerReviews\": true",
+                )
+            }),
+            "codeowners.json" => Some(r#"{"errors":[]}"#.into()),
+            _ => text,
+        });
+        assert_eq!(j.verdict, Verdict::Protected);
+    }
+
+    #[test]
+    fn an_unenforced_classic_rule_does_not_bind_an_admin() {
+        let j = verdict("ocgen-guardrail-e2e", |file, text| match file {
+            "admin.json" => {
+                text.map(|t| t.replace("\"isAdminEnforced\": true", "\"isAdminEnforced\": false"))
+            }
+            _ => text,
+        });
         assert!(
-            matches!(&j.verdict, Verdict::Bypassable(why) if why.contains("admin")),
+            matches!(&j.verdict, Verdict::Bypassable(why) if why.contains("isn't enforced for admins")),
+            "{j:?}"
+        );
+        // A lock or push restrictions an admin isn't enforced to: still bypassable.
+        let j = verdict("ocgen-guardrail-e2e", |file, text| match file {
+            "admin.json" => text.map(|t| {
+                t.replace("\"isAdminEnforced\": true", "\"isAdminEnforced\": false")
+                    .replace(
+                        "\"requiresApprovingReviews\": true",
+                        "\"requiresApprovingReviews\": false",
+                    )
+                    .replace("\"lockBranch\": false", "\"lockBranch\": true")
+            }),
+            _ => text,
+        });
+        assert!(matches!(j.verdict, Verdict::Bypassable(_)), "{j:?}");
+    }
+
+    fn with_bypass(actor: &str) -> impl Fn(&str, Option<String>) -> Option<String> {
+        let actor = actor.to_string();
+        move |file, text| {
+            match file {
+            "admin.json" => text.map(|t| {
+                t.replacen(
+                    "\"bypassPullRequestAllowances\": {\n      \"nodes\": []",
+                    &format!("\"bypassPullRequestAllowances\": {{\n      \"nodes\": [{{\"actor\": {actor}}}]"),
+                    1,
+                )
+            }),
+            "teams.json" => Some(
+                r#"{"data":{"organization":{"teams":{"nodes":[{"slug":"release"}]}}}}"#.into(),
+            ),
+            _ => text,
+        }
+        }
+    }
+
+    #[test]
+    fn bypass_lists_name_users_and_teams() {
+        let me = r#"{"__typename": "User", "login": "KonstankinoLLC"}"#;
+        let j = verdict("ocgen-guardrail-e2e", with_bypass(me));
+        assert!(
+            matches!(&j.verdict, Verdict::Bypassable(why) if why.contains("bypass list")),
+            "{j:?}"
+        );
+        let someone = r#"{"__typename": "User", "login": "someone-else"}"#;
+        assert!(matches!(
+            verdict("ocgen-guardrail-e2e", with_bypass(someone)).verdict,
+            Verdict::WithoutCodeOwners(_)
+        ));
+        let team =
+            r#"{"__typename": "Team", "slug": "release", "organization": {"login": "acme"}}"#;
+        assert!(matches!(
+            verdict("ocgen-guardrail-e2e", with_bypass(team)).verdict,
+            Verdict::Bypassable(_)
+        ));
+        let other = r#"{"__typename": "Team", "slug": "docs", "organization": {"login": "acme"}}"#;
+        assert!(matches!(
+            verdict("ocgen-guardrail-e2e", with_bypass(other)).verdict,
+            Verdict::WithoutCodeOwners(_)
+        ));
+        // Teams that can't be read leave it unknown, never "protected".
+        let j = verdict("ocgen-guardrail-e2e", move |file, text| match file {
+            "teams.json" => None,
+            _ => with_bypass(team)(file, text),
+        });
+        assert!(
+            matches!(&j.verdict, Verdict::Unknown(why) if why.contains("a team puts you")),
             "{j:?}"
         );
     }
 
     #[test]
+    fn an_unreadable_admin_view_is_unknown_not_bypassable() {
+        let j = verdict("ocgen-guardrail-e2e", |file, text| match file {
+            "admin.json" => None,
+            _ => text,
+        });
+        assert!(
+            matches!(&j.verdict, Verdict::Unknown(why) if why.contains("admin view")),
+            "{j:?}"
+        );
+    }
+
+    #[test]
+    fn ghes_versions_and_missing_routes() {
+        let ghes = |version: &'static str, no_routes: bool| {
+            judge(&facts_on(
+                "ghe.corp",
+                "hello-world",
+                move |file, text| match file {
+                    "meta.json" => Some(format!(r#"{{"installed_version":"{version}"}}"#)),
+                    "rules.json" | "codeowners.json" if no_routes => None,
+                    "rules.404.json" | "codeowners.404.json" if no_routes => Some(NO_ROUTE.into()),
+                    _ => as_writer(file, text),
+                },
+            ))
+        };
+        let j = ghes("3.17.4", true);
+        // No rulesets API: no ruleset rules, so nothing protects the branch.
+        assert_eq!(j.verdict, Verdict::Unprotected);
+        assert_eq!(
+            j.warnings,
+            [
+                "GitHub Enterprise Server 3.17.4 is past end of support, so some answers may be missing"
+            ]
+        );
+        assert!(ghes("3.18.0", false).warnings.is_empty());
+        // github.com doesn't ask /meta, and a missing route there is unknown.
+        let facts = facts_on("github.com", "hello-world", |file, text| match file {
+            "meta.json" => panic!("github.com was asked for /meta"),
+            "rules.json" => None,
+            "rules.404.json" => Some(NO_ROUTE.into()),
+            _ => as_writer(file, text),
+        });
+        assert_eq!(facts.rules, None);
+    }
+
+    #[test]
+    fn codeowners_404s() {
+        assert!(route_missing(NO_ROUTE));
+        assert!(!route_missing(NOT_FOUND));
+        assert!(!route_missing("not json"));
+        let missing = facts_on("github.com", "sandbox-runtime", as_writer);
+        assert_eq!(missing.codeowners, CodeOwners::Missing);
+        let no_api = facts_on("ghe.corp", "sandbox-runtime", |file, text| match file {
+            "codeowners.404.json" => Some(NO_ROUTE.into()),
+            _ => as_writer(file, text),
+        });
+        assert_eq!(no_api.codeowners, CodeOwners::Unknown);
+    }
+
+    #[test]
     fn codeowners_errors_and_partial_graphql() {
         let j = verdict("cli-cli", |file, text| match file {
-            "codeowners.json" => r#"{"errors":[{"line":1}]}"#.into(),
+            "codeowners.json" => Some(r#"{"errors":[{"line":1}]}"#.into()),
             _ => as_writer(file, text),
         });
         assert_eq!(

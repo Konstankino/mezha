@@ -77,6 +77,10 @@ enum Command {
         /// runtime (srt 0.0.79 or later, macOS and Linux).
         #[arg(long, conflicts_with = "project_only")]
         probe: bool,
+        /// Look from inside Claude Code's sandbox. Ask Claude to run it
+        /// with its Bash tool; read its output in the tool result.
+        #[arg(long, conflicts_with_all = ["project_only", "probe"])]
+        inside: bool,
     },
     /// Run a hook (Claude Code calls this; see .claude/settings.json).
     #[command(hide = true)]
@@ -94,7 +98,15 @@ fn main() -> ExitCode {
             json,
             project_only,
             probe,
-        } => return verify(&cli.path, *json, *project_only, *probe),
+            inside,
+        } => {
+            let opts = mezha_verify::Options {
+                project_only: *project_only,
+                probe: *probe,
+                inside: *inside,
+            };
+            return verify(&cli.path, *json, &opts);
+        }
         _ => {}
     }
     match run(cli) {
@@ -119,14 +131,10 @@ fn hook(args: &[String]) -> ExitCode {
 }
 
 /// verify keeps its own exit codes: 0 pass, 1 a check failed, 2 couldn't run.
-fn verify(root: &Path, json: bool, project_only: bool, probe: bool) -> ExitCode {
+fn verify(root: &Path, json: bool, opts: &mezha_verify::Options) -> ExitCode {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let ctx = mezha_verify::Ctx::from_process(&root);
-    let opts = mezha_verify::Options {
-        project_only,
-        probe,
-    };
-    match mezha_verify::verify(&ctx, &opts) {
+    match mezha_verify::verify(&ctx, opts) {
         Ok(report) => {
             if json {
                 print!("{}", report.to_json());

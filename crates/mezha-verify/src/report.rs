@@ -11,6 +11,8 @@ pub const STATIC: &str = "static";
 pub const PROBE: &str = "probe";
 /// Reported by the forge's API.
 pub const SERVER: &str = "server";
+/// Seen from inside Claude Code's sandbox (`--inside`).
+pub const INSIDE: &str = "inside";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -192,19 +194,23 @@ impl Report {
     }
 
     pub fn to_human(&self, root: &str) -> String {
+        let claude = match (self.mode, self.claude_code.as_deref()) {
+            ("inside", _) => String::new(),
+            (_, version) => format!(", Claude Code {}", version.unwrap_or("not found")),
+        };
+        let mode = match self.mode {
+            "project-only" => ", project files only",
+            "inside" => ", seen from inside the session",
+            _ => "",
+        };
+        let probe = self
+            .probe
+            .as_deref()
+            .map(|p| format!(", probed in {p}"))
+            .unwrap_or_default();
         let mut out = format!(
-            "mezha verify: {root} ({}, Claude Code {}{}{})\n",
-            self.platform,
-            self.claude_code.as_deref().unwrap_or("not found"),
-            if self.mode == "project-only" {
-                ", project files only"
-            } else {
-                ""
-            },
-            self.probe
-                .as_deref()
-                .map(|p| format!(", probed in {p}"))
-                .unwrap_or_default()
+            "mezha verify: {root} ({}{claude}{mode}{probe})\n",
+            self.platform
         );
         let width = self.checks.iter().map(|c| c.id.len()).max().unwrap_or(0);
         for check in &self.checks {

@@ -1,0 +1,71 @@
+name: srt
+
+# mezha's probes against a real srt (Anthropic's sandbox runtime). The test
+# suite's stand-ins can't show that srt accepts the settings mezha writes,
+# withholds what they deny, or words its refusals the way mezha's
+# classifier expects. Weekly, and by hand.
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+# Third-party actions are pinned to commit SHAs (the version is in the
+# trailing comment); nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  real-srt:
+    name: real srt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned: ubuntu-latest is moving to 26.04, where srt's seccomp
+        # helper is reported to break.
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.12.0
+          package-manager-cache: false
+      # mezha runs no program from a directory others can write, and the
+      # Ubuntu image makes its tool directories world-writable: give node
+      # a private one, first on PATH.
+      - name: Put node in a private directory
+        run: |
+          mkdir -p "$HOME/srt-tools/bin"
+          cp "$(command -v node)" "$HOME/srt-tools/bin/node"
+          chmod 755 "$HOME/srt-tools" "$HOME/srt-tools/bin" "$HOME/srt-tools/bin/node"
+          echo "$HOME/srt-tools/bin" >> "$GITHUB_PATH"
+      - name: Install srt from the lockfile
+        run: |
+          mkdir -p "$HOME/srt"
+          cp ci/srt/package.json ci/srt/package-lock.json "$HOME/srt/"
+          cd "$HOME/srt"
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm audit signatures
+          chmod -R go-w "$HOME/srt"
+          test "$(./node_modules/.bin/srt --version)" = 0.0.79
+          echo "$HOME/srt/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Linux sandbox dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-pid --unshare-user --cap-drop ALL --ro-bind / / --proc /proc true
+      - name: Real srt tests
+        env:
+          MEZHA_REAL_SRT: "1"
+        run: cargo test -p mezha --test real_srt --locked -- --ignored

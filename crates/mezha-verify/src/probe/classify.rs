@@ -106,8 +106,13 @@ pub fn classify(output: &str, nonce: &str, scheme: Scheme, platform: Platform) -
             has_local("CONNECT tunnel failed, response 403")
                 || has_local("Received HTTP code 403 from proxy")
         }
-        Scheme::Ssh => local.iter().any(|l| {
-            l.contains("socat[") && l.contains(" E CONNECT ") && l.ends_with(": Forbidden")
+        // socat logs `E <request>: <reason>`; when its request line keeps
+        // ` HTTP/1.0\r\n`, the reason lands on the next line.
+        Scheme::Ssh => local.iter().enumerate().any(|(i, l)| {
+            l.contains("socat[")
+                && l.contains(" E CONNECT ")
+                && (l.ends_with(": Forbidden")
+                    || local.get(i + 1).is_some_and(|next| *next == ": Forbidden"))
         }),
         _ => false,
     };
@@ -326,6 +331,14 @@ mod tests {
         assert_eq!(
             classify(&hostkey, NONCE, Scheme::Ssh, Platform::Linux),
             Outcome::ReachedNoAuth
+        );
+        let split = out(&[
+            "2026/10/08 12:00:00 socat[4242] E CONNECT github.com:22 HTTP/1.0\r",
+            ": Forbidden",
+        ]);
+        assert_eq!(
+            classify(&split, NONCE, Scheme::Ssh, Platform::Linux),
+            Outcome::Blocked
         );
         let proxy_auth =
             out(&["2026/10/08 socat[1] E CONNECT github.com:22: Proxy Authentication Required"]);

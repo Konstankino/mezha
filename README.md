@@ -21,10 +21,11 @@ Every security feature is either a boundary or labelled advisory. Today:
 |---|---|---|
 | Credentials withheld from sandboxed commands (`sandbox.credentials`) | **Boundary** (sandbox on) | The OS hides the known credential files and token variables from the agent's shell commands. |
 | Forge hosts kept out of `egress_allow` | **Boundary** (sandbox on) | The sandbox proxy refuses hosts that aren't allowed, so a push can't connect. On macOS this is the only push boundary: the sandbox can't hide the keychain. |
+| Forge write hosts in `deniedDomains` | **Boundary** (sandbox on) | Claude Code refuses them for sandboxed commands in every permission mode, with no "allow" prompt: neither a click, nor `bypassPermissions`, nor auto mode's classifier opens them. Other hosts outside the allowlist stay closed only while a session asks you, and verify warns about them. |
 | Sandbox `filesystem.denyWrite` on `~/.mezha` | **Boundary** (sandbox on) | The OS stops sandboxed commands from writing the approval store, so an agent can't approve itself. |
 | `deny_reads` and credential paths as `Read(...)` deny rules | **Boundary** for sandboxed commands | Claude Code merges them into the sandbox's read restrictions; for the Read tool, which runs outside the sandbox, they are permission rules. |
 | Branch protection on GitHub (`branch-protection` in verify) | **Boundary** (server) | GitHub refuses direct pushes to the default branch and asks code owners to review. verify reads it with your `gh` (queries only) and warns when your own token could bypass it. It limits what a push can break; it doesn't make a push impossible. |
-| `mezha verify` | Proof | Fails when the sandbox is off or weakened in any settings file, when an agent could push, or when the gate was edited or switched off. With `--probe` it shows the network and credential parts inside `srt` instead of only reasoning about them. |
+| `mezha verify` | Proof | Fails when the sandbox is off or weakened in any settings file, when an agent could push, or when the gate was edited or switched off. With `--probe` it shows the network and credential parts inside `srt` instead of only reasoning about them; with `--inside`, Claude runs it inside the session's own sandbox. |
 | Git guard rail in `env` (no credential helper, no askpass) | *Advisory* | It closes accidental helper use, but a command can name a helper itself (`git -c credential.helper=...`). |
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
@@ -40,8 +41,7 @@ only from the directory it starts in, so start it in the project root.
 Withholding credentials means the agent can't push, fetch from private
 remotes, run `gh` or sign commits in the sandbox, even with an approval: a
 human does those from their own terminal ([ADR-0003](docs/adr/0003-push-boundary.md)).
-Not here yet: `mezha verify --inside` (step 1c) and the approval broker with
-short-lived tokens.
+Not here yet: the approval broker with short-lived tokens.
 
 ## Install
 
@@ -114,9 +114,33 @@ A quick manual check:
    the keychain finding (static), and the probe shows the network open.
 3. The same on Linux passes, with "in srt no credential was readable".
 
+4. In a Claude Code session on a mezha project, ask Claude to run
+   `mezha verify --inside` and read the command's output. `inside-sandbox`
+   passes, `github.com:443` is "refused inside the sandbox", and no "allow"
+   prompt appears.
+
 verify only runs `srt`, `gh`, `git` and the other tools it uses when they
 sit outside places an agent can write: the project, `$TMPDIR`, the sandbox's
 `allowWrite` paths, and directories the group or everyone can write.
+
+### From inside a session
+
+`mezha verify --inside` is for Claude to run with its Bash tool, so it looks
+at the sandbox Claude Code really built: its own merge of every settings
+file, the `env` block and its proxy. It checks:
+
+- that the command is sandboxed. The kernel decides, not environment
+  variables: a direct connection is refused, and `mezha.toml` can't be
+  opened for writing;
+- that srt's proxy is in front, and that forge hosts in `deniedDomains` are
+  refused. It contacts nothing that could make Claude Code ask you about a
+  host;
+- that no credential file, token variable or ssh agent is readable.
+
+The report reaches you through Claude, so treat it as a diagnostic: read
+the command's own output in the tool result, not Claude's summary. Without
+`CLAUDECODE` in the environment it exits 2; from your own terminal, use
+`--probe`.
 
 ## Commands
 
@@ -126,7 +150,7 @@ sit outside places an agent can write: the project, `$TMPDIR`, the sandbox's
 | `mezha compile` | Validates the spec and writes the generated files. Writes nothing if a generated file was written or edited by someone else. |
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
-| `mezha verify [--json] [--project-only \| --probe]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt` ([Probing the boundary](#probing-the-boundary)). |
+| `mezha verify [--json] [--project-only \| --probe \| --inside]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt`, and `--inside` is for Claude to run inside the session's sandbox ([Probing the boundary](#probing-the-boundary)). |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -144,8 +168,11 @@ sit outside places an agent can write: the project, `$TMPDIR`, the sandbox's
     prompt (advisory);
   - `sandbox` (when `policy.sandbox = true`): enabled, no unsandboxed
     retries, no silent fallback when the sandbox can't start, `egress_allow`
-    as the allowed hosts, writes to `~/.mezha`, `mezha.toml` and the state
-    file denied, and credential files and token variables withheld;
+    as the allowed hosts, the known forge write hosts it doesn't cover
+    (github.com, api/uploads/ssh.github.com, gitlab.com, bitbucket.org,
+    api.bitbucket.org) as denied hosts, writes to `~/.mezha`, `mezha.toml`
+    and the state file denied, and credential files and token variables
+    withheld;
   - one `PreToolUse` hook on every tool: the approval gate.
 - `.claude/.mezha-state.json`: SHA-256 fingerprints of the generated files.
   It tells mezha's own output from a hand edit; it is not a tamper check.
@@ -186,6 +213,18 @@ probe's scripts against real git with local listeners (no network, no srt);
 GitHub responses recorded in `tests/fixtures/protection`. Don't run `mezha compile` in this repository
 itself: with a broken or missing binary, the fail-closed hook would block
 your own session.
+
+`crates/mezha-cli/tests/real_srt.rs` runs the probes and `--inside` against
+a real srt. The tests are ignored by default; with srt 0.0.79 and Node 22 on
+`PATH`:
+
+```bash
+MEZHA_REAL_SRT=1 cargo test -p mezha --test real_srt -- --ignored
+```
+
+The scheduled workflow `.github/workflows/srt.yml` runs them weekly on
+Ubuntu 24.04 and macOS 15, with srt installed from the lockfile in
+`ci/srt`. It needs the repository on GitHub to run.
 
 The workspace has eight crates: `mezha-spec`, `mezha-render`, `mezha-hooks`,
 `mezha-broker`, `mezha-verify` and `mezha` (the CLI) do the work;

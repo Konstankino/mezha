@@ -9,15 +9,33 @@ use crate::Options;
 use crate::creds::Inventory;
 use crate::gitcfg::GitConfig;
 use crate::hosts::{Endpoint, Pattern, Remote, github_endpoints};
-use crate::layers::Layers;
+use crate::layers::{Layers, Scope};
 use crate::probe::{self, NetResult};
 use crate::report::{self, Check, Findings, Kind, Status};
+use serde_json::Value;
+
+/// Whether sandboxed commands reach a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Allowed, or let through by the permission mode.
+    Open,
+    /// Refused in every permission mode: `deniedDomains`, `strictAllowlist`,
+    /// `allowManagedDomainsOnly` or `dontAsk`.
+    Refused,
+    /// Refused until someone clicks "allow" or a session skips prompts.
+    Prompt,
+    /// Auto mode: a classifier can let a command reach it.
+    Classifier,
+}
 
 /// The hosts sandboxed commands may reach: `allowedDomains` from every
 /// scope plus `WebFetch(domain:...)` allow rules, minus `deniedDomains`.
+/// What happens to the rest depends on the permission mode.
 pub struct Network {
     allowed: Vec<Pattern>,
     denied: Vec<Pattern>,
+    /// What happens to a host neither list names.
+    outside: Reach,
     /// Why reachability can't be judged from settings, if it can't.
     pub unknown: Option<String>,
 }
@@ -57,16 +75,56 @@ impl Network {
                 .filter(|(v, _)| !v.is_null())
                 .map(|(_, l)| format!("a custom sandbox proxy is set in {}", l.label))
         });
+        // strictAllowlist counts only from user and managed settings, and
+        // allowManagedDomainsOnly only from managed ones.
+        let set = |key: &str, scopes: &[Scope]| {
+            layers
+                .every(key)
+                .any(|(v, l)| v == &Value::Bool(true) && scopes.contains(&l.scope))
+        };
+        let strict = set(
+            "/sandbox/network/strictAllowlist",
+            &[Scope::User, Scope::Managed],
+        ) || set(
+            "/sandbox/network/allowManagedDomainsOnly",
+            &[Scope::Managed],
+        );
+        let mode = layers
+            .winner("/permissions/defaultMode")
+            .and_then(|(v, _)| v.as_str());
+        let outside = match mode {
+            _ if strict => Reach::Refused,
+            Some("bypassPermissions") => Reach::Open,
+            Some("auto") => Reach::Classifier,
+            Some("dontAsk") => Reach::Refused,
+            _ => Reach::Prompt,
+        };
         Network {
             allowed,
             denied,
+            outside,
             unknown,
         }
     }
 
-    pub fn reaches(&self, endpoint: &Endpoint) -> bool {
-        self.allowed.iter().any(|p| p.matches(endpoint))
-            && !self.denied.iter().any(|p| p.matches(endpoint))
+    /// The allowlist alone, which is what srt enforces.
+    pub fn allows(&self, endpoint: &Endpoint) -> bool {
+        self.allowed.iter().any(|p| p.matches(endpoint)) && !self.denied(endpoint)
+    }
+
+    pub fn denied(&self, endpoint: &Endpoint) -> bool {
+        self.denied.iter().any(|p| p.matches(endpoint))
+    }
+
+    /// The allowlist and the permission mode together.
+    pub fn reach(&self, endpoint: &Endpoint) -> Reach {
+        if self.denied(endpoint) {
+            Reach::Refused
+        } else if self.allowed.iter().any(|p| p.matches(endpoint)) {
+            Reach::Open
+        } else {
+            self.outside
+        }
     }
 }
 
@@ -139,12 +197,12 @@ pub fn check(
     let (probed_open, probed_closed) = (probed(true), probed(false));
     let mut differ: Vec<String> = Vec::new();
     for e in &probed_closed {
-        if network.reaches(e) {
+        if network.allows(e) {
             differ.push(format!("srt refused {e}, which mezha's reading allows"));
         }
     }
     for e in &probed_open {
-        if !network.reaches(e) {
+        if !network.allows(e) {
             differ.push(format!("srt reached {e}, which mezha's reading blocks"));
         }
     }
@@ -160,17 +218,45 @@ pub fn check(
     }
 
     // Open by either reading counts as open.
+    let by_reach = |reach: Reach| -> Vec<String> {
+        endpoints
+            .iter()
+            .filter(|e| network.reach(e) == reach && !probed_open.contains(e))
+            .map(ToString::to_string)
+            .collect()
+    };
+    let (prompted, classified) = (by_reach(Reach::Prompt), by_reach(Reach::Classifier));
     let mut open: Vec<Endpoint> = endpoints
         .iter()
-        .filter(|e| network.reaches(e))
+        .filter(|e| network.reach(e) == Reach::Open)
         .cloned()
-        .chain(probed_open)
+        .chain(probed_open.iter().cloned())
         .collect();
     open.sort();
     open.dedup();
+    let by_mode = open
+        .iter()
+        .any(|e| !network.allows(e) && !probed_open.contains(e));
     let open: Vec<String> = open.iter().map(ToString::to_string).collect();
     let hosts = |list: &[String]| list.join(", ");
-    if open.is_empty() && network.unknown.is_none() {
+    if !prompted.is_empty() {
+        f.warn(
+            format!(
+                "closed only while Claude Code asks you: {}; one click on \"allow\", or a session that skips prompts, opens them",
+                hosts(&prompted)
+            ),
+            Some("Run `mezha compile`, which denies the known forge hosts in every permission mode, and add other hosts to sandbox.network.deniedDomains in your user settings.".into()),
+        );
+    }
+    let unknown = network.unknown.clone().or_else(|| {
+        (!classified.is_empty()).then(|| {
+            format!(
+                "in auto mode a classifier decides whether commands reach {}",
+                hosts(&classified)
+            )
+        })
+    });
+    if open.is_empty() && unknown.is_none() {
         let all: Vec<String> = endpoints.iter().map(ToString::to_string).collect();
         let mut text = format!("sandboxed commands can't reach {}", hosts(&all));
         if !probed_closed.is_empty() {
@@ -181,11 +267,14 @@ pub fn check(
         add_probe_summary(&mut f, probe, &network);
         return f.into_check(check, "");
     }
-    let reach = match (&network.unknown, open.is_empty()) {
+    let mut reach = match (&unknown, open.is_empty()) {
         (Some(why), true) => format!("network reach is unknown ({why})"),
         (Some(why), false) => format!("sandboxed commands can reach {} ({why})", hosts(&open)),
         (None, _) => format!("sandboxed commands can reach {}", hosts(&open)),
     };
+    if by_mode {
+        reach.push_str(" (in bypassPermissions mode sandboxed commands reach any host deniedDomains doesn't list)");
+    }
     let proven: &[String] = probe.map_or(&[], |p| &p.proven);
     let probe_unknown: &[String] = probe.map_or(&[], |p| &p.unknown);
 

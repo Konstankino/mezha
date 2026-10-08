@@ -235,7 +235,13 @@
       "docs.rs"
     ],
     "deniedDomains": [
-      "evil.example"
+      "evil.example",
+      "api.github.com",
+      "uploads.github.com",
+      "ssh.github.com",
+      "gitlab.com",
+      "bitbucket.org",
+      "api.bitbucket.org"
     ]
   }
 }

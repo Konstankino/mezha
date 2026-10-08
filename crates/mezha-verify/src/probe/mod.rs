@@ -369,6 +369,43 @@ fn init_bare(ctx: &Ctx, git: &Path, cwd: &Path, dir: &Path) -> bool {
     .is_ok_and(|o| o.success())
 }
 
+/// The network probe run with no sandbox of its own, for `--inside`,
+/// where Claude Code's sandbox is already around this process.
+pub(crate) fn network_here(
+    ctx: &Ctx,
+    targets: &[Target],
+    git: Option<&GitConfig>,
+) -> Vec<NetResult> {
+    let inconclusive = |why: &str| {
+        targets
+            .iter()
+            .map(|t| NetResult {
+                target: t.clone(),
+                outcome: Outcome::Inconclusive(why.to_string()),
+            })
+            .collect()
+    };
+    let Some(git_exe) = ctx.which_trusted("git").path else {
+        return inconclusive("git isn't on PATH");
+    };
+    let Ok(scratch) = Scratch::new("mezha-inside") else {
+        return inconclusive("no scratch directory");
+    };
+    let ca = git.map(trusted_ca).unwrap_or_default();
+    network(
+        ctx,
+        &Launcher::Direct,
+        &git_exe,
+        scratch.path(),
+        targets,
+        &ca,
+        TestHook::default(),
+    )
+    .into_iter()
+    .map(|(result, _)| result)
+    .collect()
+}
+
 /// A credential file that exists outside the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialFile {
@@ -376,10 +413,34 @@ pub struct CredentialFile {
     pub label: String,
 }
 
-/// Credential files a push could use: ssh keys, gh's hosts file (wherever
-/// it was moved), git's credential stores, `.netrc`, hub's and glab's
-/// config, a `store` helper's file, and the targets of symlinks among them.
+/// Credential files a push could use that exist outside the sandbox: ssh
+/// keys, gh's hosts file (wherever it was moved), git's credential stores,
+/// `.netrc`, hub's and glab's config, a `store` helper's file, and the
+/// targets of symlinks among them.
 pub fn credential_files(ctx: &Ctx, git: Option<&GitConfig>) -> Vec<CredentialFile> {
+    let mut files: Vec<CredentialFile> = Vec::new();
+    for path in credential_paths(ctx, git) {
+        let text = path.to_string_lossy();
+        if text.contains('\n') || !path.is_file() || files.iter().any(|f| f.path == path) {
+            continue;
+        }
+        let label = label(ctx, &path);
+        files.push(CredentialFile { path, label });
+    }
+    files
+}
+
+/// `~/x` for a path under home, else the path.
+pub fn label(ctx: &Ctx, path: &Path) -> String {
+    match ctx.home.as_ref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Every place [`credential_files`] looks, whether or not something is
+/// there (inside the sandbox a withheld file can look absent).
+pub fn credential_paths(ctx: &Ctx, git: Option<&GitConfig>) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Some(ssh) = ctx.expand("~/.ssh") {
         let mut keys: Vec<PathBuf> = std::fs::read_dir(&ssh)
@@ -398,7 +459,7 @@ pub fn credential_files(ctx: &Ctx, git: Option<&GitConfig>) -> Vec<CredentialFil
         keys.sort();
         paths.extend(keys);
     }
-    paths.extend(creds::gh_hosts_file(ctx));
+    paths.extend(creds::gh_hosts_path(ctx));
     for p in [
         "~/.git-credentials",
         "~/.config/git/credentials",
@@ -426,20 +487,7 @@ pub fn credential_files(ctx: &Ctx, git: Option<&GitConfig>) -> Vec<CredentialFil
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     paths.extend(targets);
-    let home = ctx.home.clone();
-    let mut files: Vec<CredentialFile> = Vec::new();
-    for path in paths {
-        let text = path.to_string_lossy();
-        if text.contains('\n') || !path.is_file() || files.iter().any(|f| f.path == path) {
-            continue;
-        }
-        let label = match home.as_ref().and_then(|h| path.strip_prefix(h).ok()) {
-            Some(rest) => format!("~/{}", rest.display()),
-            None => path.display().to_string(),
-        };
-        files.push(CredentialFile { path, label });
-    }
-    files
+    paths
 }
 
 fn valid_var(name: &str) -> bool {

@@ -302,6 +302,14 @@
       "allowedDomains": [
         "github.com",
         "crates.io"
+      ],
+      "deniedDomains": [
+        "api.github.com",
+        "uploads.github.com",
+        "ssh.github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "api.bitbucket.org"
       ]
     }
   }

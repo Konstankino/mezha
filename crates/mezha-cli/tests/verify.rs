@@ -145,3 +145,24 @@ fn probe_and_project_only_do_not_go_together() {
         stderr(&out)
     );
 }
+
+#[test]
+fn inside_needs_claude_code_and_goes_alone() {
+    let p = compiled();
+    let out = p.mezha(&["verify", "--inside"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--inside can't run"),
+        "{}",
+        stderr(&out)
+    );
+    for other in ["--probe", "--project-only"] {
+        let out = p.mezha(&["verify", "--inside", other]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            stderr(&out).contains("cannot be used with"),
+            "{}",
+            stderr(&out)
+        );
+    }
+}

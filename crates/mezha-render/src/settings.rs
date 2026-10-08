@@ -27,6 +27,49 @@ const ASK_COMMANDS: [&str; 3] = [
 /// settings and `.git/hooks` on its own.
 const DENY_WRITE: [&str; 3] = ["~/.mezha", "./mezha.toml", "./.claude/.mezha-state.json"];
 
+/// Hosts a forge accepts pushes on: git over HTTPS (and SSH over port
+/// 443), and the APIs that write. Those `egress_allow` doesn't cover
+/// become `deniedDomains`, which Claude Code refuses for sandboxed commands
+/// in every permission mode, without an "allow" prompt to click
+/// (ADR-0003, step 1c). The WebFetch tool isn't affected.
+pub const FORGE_WRITE_HOSTS: [&str; 7] = [
+    "github.com",
+    "api.github.com",
+    "uploads.github.com",
+    "ssh.github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "api.bitbucket.org",
+];
+
+/// Whether an `egress_allow` entry lets sandboxed commands reach `host`,
+/// matched like the sandbox proxy does: `example.com` only itself,
+/// `*.example.com` its subdomains, `*` everything. An entry limited to a
+/// port still covers the host, so denying it wouldn't take the port away.
+fn allows(entry: &str, host: &str) -> bool {
+    let entry = entry.trim().to_ascii_lowercase();
+    let entry = match entry.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h.to_string(),
+        _ => entry,
+    };
+    match entry.as_str() {
+        "*" => true,
+        e => match e.strip_prefix("*.") {
+            Some(suffix) => host.len() > suffix.len() + 1 && host.ends_with(&format!(".{suffix}")),
+            None => host == e,
+        },
+    }
+}
+
+/// The forge write hosts no `egress_allow` entry covers.
+pub fn denied_domains(egress_allow: &[String]) -> Vec<&'static str> {
+    FORGE_WRITE_HOSTS
+        .iter()
+        .copied()
+        .filter(|host| !egress_allow.iter().any(|e| allows(e, host)))
+        .collect()
+}
+
 /// Credential files and directories withheld from the agent, as
 /// `(path, is_dir)`. The sandbox hides them from shell commands and a
 /// `Read(...)` deny rule hides them from the Read tool, which runs outside
@@ -161,10 +204,46 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
             // without bubblewrap).
             "allowUnsandboxedCommands": false,
             "failIfUnavailable": true,
-            "network": { "allowedDomains": spec.policy.egress_allow },
+            "network": {
+                "allowedDomains": spec.policy.egress_allow,
+                "deniedDomains": denied_domains(&spec.policy.egress_allow),
+            },
             "filesystem": { "denyWrite": DENY_WRITE },
             "credentials": { "files": files, "envVars": vars },
         });
     }
     settings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn denied(egress: &[&str]) -> Vec<&'static str> {
+        let egress: Vec<String> = egress.iter().map(|e| e.to_string()).collect();
+        denied_domains(&egress)
+    }
+
+    #[test]
+    fn forge_hosts_outside_egress_allow_are_denied() {
+        assert_eq!(denied(&[]), FORGE_WRITE_HOSTS);
+        assert_eq!(
+            denied(&["github.com", "crates.io"]),
+            [
+                "api.github.com",
+                "uploads.github.com",
+                "ssh.github.com",
+                "gitlab.com",
+                "bitbucket.org",
+                "api.bitbucket.org"
+            ]
+        );
+        // A wildcard covers subdomains, not the apex.
+        assert_eq!(
+            denied(&["*.github.com", "GitLab.com:443", "*.bitbucket.org"]),
+            ["github.com", "bitbucket.org"]
+        );
+        assert!(denied(&["*"]).is_empty());
+        assert_eq!(denied(&["evilgithub.com"]).len(), 7);
+    }
 }

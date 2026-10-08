@@ -1,0 +1,8 @@
+{
+  "name": "mezha-srt-ci",
+  "private": true,
+  "description": "Pins the sandbox runtime that the scheduled srt job tests mezha against.",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.79"
+  }
+}

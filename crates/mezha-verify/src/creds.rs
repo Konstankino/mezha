@@ -270,13 +270,17 @@ fn looks_like_forge_token(name: &str) -> bool {
 }
 
 pub(crate) fn gh_hosts_file(ctx: &Ctx) -> Option<PathBuf> {
+    gh_hosts_path(ctx).filter(|hosts| hosts.exists())
+}
+
+/// Where gh keeps its hosts file, whether or not it is there.
+pub(crate) fn gh_hosts_path(ctx: &Ctx) -> Option<PathBuf> {
     let dir = ctx
         .var("GH_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| ctx.var("XDG_CONFIG_HOME").map(|x| Path::new(x).join("gh")))
         .or_else(|| ctx.expand("~/.config/gh"))?;
-    let hosts = dir.join("hosts.yml");
-    hosts.exists().then_some(hosts)
+    Some(dir.join("hosts.yml"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

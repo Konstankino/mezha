@@ -1,0 +1,24 @@
+{
+ "data": {
+  "viewer": {
+   "login": "konstankinollc"
+  },
+  "repository": {
+   "defaultBranchRef": {
+    "branchProtectionRule": {
+     "isAdminEnforced": true,
+     "requiresApprovingReviews": true,
+     "requiresCodeOwnerReviews": false,
+     "lockBranch": false,
+     "restrictsPushes": false,
+     "pushAllowances": {
+      "nodes": []
+     },
+     "bypassPullRequestAllowances": {
+      "nodes": []
+     }
+    }
+   }
+  }
+ }
+}

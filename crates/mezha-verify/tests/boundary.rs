@@ -94,13 +94,19 @@ impl Fixture {
                 r#"{{ printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; echo "PWD $(pwd)"; env | sed 's/^/ENV /'; }} >> '{log}'
 args="$*"
 case "$args" in
+  *branchProtectionRule*) file=admin.json ;;
+  *userLogins*) file=teams.json ;;
   *graphql*) file=graphql.json ;;
   */rules/branches/*) file=rules.json ;;
   */rulesets/*) file=ruleset-$(printf '%s' "$args" | sed -n 's|.*/rulesets/\([0-9]*\).*|\1|p').json ;;
   *codeowners/errors*) file=codeowners.json ;;
+  *" meta "*) file=meta.json ;;
   *) echo "unexpected: $args" >&2; exit 2 ;;
 esac
-if [ -f '{dir}/'"$file" ]; then cat '{dir}/'"$file"; else echo '{{"message":"Not Found"}}'; echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi"#,
+missing='{dir}/'"${{file%.json}}.404.json"
+if [ -f '{dir}/'"$file" ]; then cat '{dir}/'"$file"
+elif [ -f "$missing" ]; then cat "$missing"; echo 'gh: Not Found (HTTP 404)' >&2; exit 1
+else echo '{{"message":"Not Found","documentation_url":"https://docs.github.com/rest/x#y"}}'; echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi"#,
                 log = log.display(),
                 dir = dir.display(),
             ),
@@ -343,9 +349,17 @@ fn scenario_7_macos_keychain_with_github_allowed() {
 
 #[test]
 fn a_webfetch_allow_rule_opens_the_network_too() {
-    let f = Fixture::new("", "https://x:tok@github.com/o/r.git");
-    assert_eq!(status(&f.verify(), "push-boundary"), Status::Pass);
-    f.local_settings(json!({ "permissions": { "allow": ["WebFetch(domain:github.com)"] } }));
+    // A host mezha doesn't deny: closed only while Claude Code asks.
+    let f = Fixture::new("", "https://x:tok@git.example.com/o/r.git");
+    let r = f.verify();
+    assert_eq!(status(&r, "push-boundary"), Status::Warn);
+    assert!(
+        detail(&r, "push-boundary")
+            .contains("closed only while Claude Code asks you: git.example.com:443"),
+        "{}",
+        detail(&r, "push-boundary")
+    );
+    f.local_settings(json!({ "permissions": { "allow": ["WebFetch(domain:git.example.com)"] } }));
     let r = f.verify();
     assert_eq!(
         status(&r, "push-boundary"),
@@ -353,6 +367,69 @@ fn a_webfetch_allow_rule_opens_the_network_too() {
         "{}",
         detail(&r, "push-boundary")
     );
+}
+
+#[test]
+fn denied_forge_hosts_stay_closed_whatever_else_allows_them() {
+    // compile denies github.com's write hosts, and a deny beats a
+    // WebFetch allow rule and bypassPermissions mode alike.
+    let f = Fixture::new("", "https://x:tok@github.com/o/r.git");
+    f.local_settings(json!({
+        "permissions": {
+            "allow": ["WebFetch(domain:github.com)"],
+            "defaultMode": "bypassPermissions"
+        }
+    }));
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "push-boundary"),
+        Status::Pass,
+        "{}",
+        detail(&r, "push-boundary")
+    );
+}
+
+#[test]
+fn the_permission_mode_decides_unlisted_hosts() {
+    let url = "https://x:tok@git.example.com/o/r.git";
+    let mode = |mode: &str| {
+        let f = Fixture::new("", url);
+        f.user_settings(json!({ "permissions": { "defaultMode": mode } }));
+        f.verify()
+    };
+    // bypassPermissions lets sandboxed commands reach any host not denied.
+    let r = mode("bypassPermissions");
+    assert_eq!(status(&r, "push-boundary"), Status::Fail);
+    assert!(
+        detail(&r, "push-boundary")
+            .contains("in bypassPermissions mode sandboxed commands reach any host"),
+        "{}",
+        detail(&r, "push-boundary")
+    );
+    // Auto mode leaves it to a classifier: unknown reach, with a reachable
+    // credential, fails.
+    let r = mode("auto");
+    assert_eq!(status(&r, "push-boundary"), Status::Fail);
+    assert!(
+        detail(&r, "push-boundary").contains("in auto mode a classifier decides"),
+        "{}",
+        detail(&r, "push-boundary")
+    );
+    // dontAsk refuses outright.
+    assert_eq!(status(&mode("dontAsk"), "push-boundary"), Status::Pass);
+
+    // strictAllowlist from user settings refuses in every mode...
+    let f = Fixture::new("", url);
+    f.user_settings(json!({
+        "permissions": { "defaultMode": "bypassPermissions" },
+        "sandbox": { "network": { "strictAllowlist": true } }
+    }));
+    assert_eq!(status(&f.verify(), "push-boundary"), Status::Pass);
+    // ...but not from the repository, where Claude Code ignores it.
+    let f = Fixture::new("", url);
+    f.user_settings(json!({ "permissions": { "defaultMode": "bypassPermissions" } }));
+    f.local_settings(json!({ "sandbox": { "network": { "strictAllowlist": true } } }));
+    assert_eq!(status(&f.verify(), "push-boundary"), Status::Fail);
 }
 
 #[test]
@@ -435,8 +512,10 @@ fn a_missing_spec_cannot_run() {
     assert!(matches!(err, mezha_verify::CantRun::NoSpec(_)));
 }
 
+/// A WRITE user without push restrictions (viewerCanPush is true at WRITE).
 fn as_writer(_: &str, text: String) -> String {
     text.replace("\"READ\"", "\"WRITE\"")
+        .replace("\"viewerCanPush\": false", "\"viewerCanPush\": true")
 }
 
 fn check<'a>(report: &'a Report, id: &str) -> &'a mezha_verify::Check {
@@ -577,6 +656,7 @@ fn enterprise_tokens_reach_only_hosts_the_user_set_up() {
     let mut ctx = f.ctx(Platform::Linux);
     ctx.vars
         .insert("GH_ENTERPRISE_TOKEN".into(), "ent-secret".into());
+    ctx.vars.insert("GH_TOKEN".into(), "dotcom-secret".into());
     let r = verify(&ctx, &Options::default()).unwrap();
     let detail = &check(&r, "branch-protection").detail;
     assert!(detail.contains("ghe.corp/team/app"), "{detail}");
@@ -600,12 +680,39 @@ fn enterprise_tokens_reach_only_hosts_the_user_set_up() {
             assert_eq!(host, "ghe.corp", "enterprise token sent to {host}");
             seen.0 += 1;
         }
+        if line.starts_with("ENV GH_TOKEN=") {
+            assert_eq!(host, "github.com", "GH_TOKEN sent to {host}");
+        }
         if line.starts_with("ARGS") && host == "github.com" {
             seen.1 += 1;
         }
     }
     assert!(seen.0 > 0 && seen.1 > 0, "{seen:?}");
     assert!(!log.contains("ghe.evil"));
+    // Only the enterprise server is asked for its version.
+    assert!(log.contains("[meta] [--hostname] [ghe.corp]"), "{log}");
+    assert!(!log.contains("[meta] [--hostname] [github.com]"));
+}
+
+#[test]
+fn an_admin_bound_by_an_enforced_rule_end_to_end() {
+    let f = Fixture::new("", GITHUB);
+    let log = f.fake_gh("ocgen-guardrail-e2e", |_, text| text);
+    let r = f.verify();
+    let c = check(&r, "branch-protection");
+    assert_eq!(c.status, Status::Warn, "{}", c.detail);
+    assert!(
+        c.detail.contains(
+            "`main` can't be pushed to directly, but no rule that binds you requires code-owner review"
+        ),
+        "{}",
+        c.detail
+    );
+    let log = fs::read_to_string(log).unwrap();
+    assert!(
+        log.contains("branchProtectionRule"),
+        "the admin view was asked for"
+    );
 }
 
 /// Answers each connection with what `answer` makes of the request head,
@@ -829,4 +936,147 @@ fn probe_readable_credentials_are_proven() {
         "{}",
         c.detail
     );
+}
+
+fn inside_opts() -> Options {
+    Options {
+        inside: true,
+        ..Options::default()
+    }
+}
+
+#[test]
+fn inside_is_only_for_claude_to_run() {
+    let f = Fixture::new("", GITHUB);
+    let err = verify(&f.ctx(Platform::Linux), &inside_opts())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Ask Claude to run `mezha verify --inside`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn inside_from_outside_the_sandbox_fails() {
+    let f = Fixture::new("", GITHUB);
+    let mut ctx = f.ctx(Platform::Linux);
+    ctx.vars.insert("CLAUDECODE".into(), "1".into());
+    let r = verify(&ctx, &inside_opts()).unwrap();
+    assert_eq!(r.mode, "inside");
+    let ids: Vec<&str> = r.checks.iter().map(|c| c.id).collect();
+    assert_eq!(
+        ids,
+        ["inside-sandbox", "inside-network", "inside-credentials"]
+    );
+    let c = check(&r, "inside-sandbox");
+    assert_eq!(c.status, Status::Fail, "{}", c.detail);
+    assert_eq!(c.evidence, ["inside"]);
+    assert_eq!(status(&r, "inside-network"), Status::Skip);
+    assert_eq!(status(&r, "inside-credentials"), Status::Skip);
+    assert!(r.notes[0].contains("read the command's own output"));
+    assert_eq!(r.exit_code(), 1);
+}
+
+/// Signals as Claude Code's sandbox on Linux would show them.
+fn sandboxed() -> mezha_verify::inside::Signals {
+    mezha_verify::inside::Signals {
+        platform: Platform::Linux,
+        direct: mezha_verify::inside::Direct::NoRoute,
+        single_id_map: true,
+        no_new_privs: true,
+        loopback_only: true,
+        policy: mezha_verify::inside::Policy::Applied,
+        env_says_sandboxed: true,
+    }
+}
+
+/// srt's proxy: 407 for a tunnel without its token, 403 for every host
+/// with it (as for a host in deniedDomains).
+fn srt_proxy(head: &str) -> String {
+    if head.contains("Proxy-Authorization") {
+        "HTTP/1.1 403 Forbidden\r\nX-Proxy-Error: blocked-by-allowlist\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+    } else {
+        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"srt\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+    }
+}
+
+fn inside_network(f: &Fixture, proxy_port: u16) -> mezha_verify::Check {
+    let mut ctx = f.ctx(Platform::Linux);
+    let proxy = format!("http://srt:token@127.0.0.1:{proxy_port}");
+    ctx.vars.insert("HTTPS_PROXY".into(), proxy.clone());
+    ctx.vars.insert("https_proxy".into(), proxy);
+    let layers = mezha_verify::layers::Layers::load(&ctx, false);
+    let git = mezha_verify::gitcfg::GitConfig::read(&ctx, false).ok();
+    mezha_verify::inside::network_check(&ctx, &layers, git.as_ref(), &sandboxed())
+}
+
+#[test]
+fn inside_denied_forge_hosts_are_refused_and_others_left_alone() {
+    let f = Fixture::new("", GITHUB);
+    f.git(&["remote", "add", "corp", "https://git.example.com/o/r.git"]);
+    let (port, heads) = serve(srt_proxy);
+    let c = inside_network(&f, port);
+    assert_eq!(c.status, Status::Warn, "{}", c.detail);
+    assert!(c.detail.contains("srt's proxy is in front"), "{}", c.detail);
+    assert!(
+        c.detail
+            .contains("refused inside the sandbox: github.com:443"),
+        "{}",
+        c.detail
+    );
+    assert!(
+        c.detail.contains("not contacted, since Claude Code could ask you about them or let them through: git.example.com:443"),
+        "{}",
+        c.detail
+    );
+    let seen: Vec<String> = heads.try_iter().collect();
+    assert!(
+        seen.iter()
+            .any(|h| h.starts_with("CONNECT github.com:443") && h.contains("Proxy-Authorization")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().all(|h| !h.contains("git.example.com")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn inside_a_proxy_that_isnt_srt_gets_no_forge_traffic() {
+    let f = Fixture::new("", GITHUB);
+    let (port, heads) = serve(|_| {
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+    });
+    let c = inside_network(&f, port);
+    assert_eq!(c.status, Status::Warn, "{}", c.detail);
+    assert!(c.detail.contains("the proxy isn't srt's"), "{}", c.detail);
+    let seen: Vec<String> = heads.try_iter().collect();
+    assert_eq!(seen.len(), 1, "only the fingerprint: {seen:?}");
+}
+
+#[test]
+fn inside_credentials_are_judged_as_seen() {
+    let f = Fixture::new("", GITHUB);
+    let mut ctx = f.ctx(Platform::Linux);
+    ctx.vars.insert("GH_TOKEN".into(), "fake_value_0123".into());
+    let c = mezha_verify::inside::credentials_check(&ctx, None, &sandboxed());
+    assert_eq!(c.status, Status::Pass, "{}", c.detail);
+    assert!(c.detail.contains("masked"), "{}", c.detail);
+
+    fs::write(f.home.join(".netrc"), "machine github.com password x\n").unwrap();
+    ctx.vars.insert("GITLAB_TOKEN".into(), "glpat-real".into());
+    let c = mezha_verify::inside::credentials_check(&ctx, None, &sandboxed());
+    assert_eq!(c.status, Status::Fail, "{}", c.detail);
+    assert!(
+        c.detail
+            .contains("readable inside the sandbox: ~/.netrc, environment variable GITLAB_TOKEN"),
+        "{}",
+        c.detail
+    );
+    assert!(!r_contains_secret(&c.detail));
+}
+
+fn r_contains_secret(text: &str) -> bool {
+    text.contains("glpat-real") || text.contains("password x")
 }
