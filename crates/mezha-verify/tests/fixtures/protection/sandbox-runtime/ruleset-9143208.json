@@ -1,0 +1,98 @@
+{
+ "id": 9143208,
+ "name": "Branch Protection",
+ "target": "branch",
+ "source_type": "Repository",
+ "source": "anthropics/sandbox-runtime",
+ "enforcement": "active",
+ "conditions": {
+  "ref_name": {
+   "exclude": [],
+   "include": [
+    "~DEFAULT_BRANCH"
+   ]
+  }
+ },
+ "rules": [
+  {
+   "type": "deletion"
+  },
+  {
+   "type": "non_fast_forward"
+  },
+  {
+   "type": "pull_request",
+   "parameters": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews_on_push": false,
+    "required_reviewers": [],
+    "require_code_owner_review": false,
+    "dismissal_restriction": {
+     "enabled": false,
+     "allowed_actors": []
+    },
+    "require_last_push_approval": false,
+    "required_review_thread_resolution": false,
+    "require_extra_approval_for_unattributed_changes": true,
+    "allowed_merge_methods": [
+     "merge",
+     "squash",
+     "rebase"
+    ]
+   }
+  },
+  {
+   "type": "required_status_checks",
+   "parameters": {
+    "strict_required_status_checks_policy": false,
+    "do_not_enforce_on_create": false,
+    "required_status_checks": [
+     {
+      "context": "Tests (docker / arm64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (docker / x86-64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (linux / arm64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (linux / x86-64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (macos / arm64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (macos / x86-64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (windows / arm64)",
+      "integration_id": 15368
+     },
+     {
+      "context": "Tests (windows / x86-64)",
+      "integration_id": 15368
+     }
+    ]
+   }
+  }
+ ],
+ "node_id": "RRS_lACqUmVwb3NpdG9yec5AWMmozgCLg6g",
+ "created_at": "2025-10-23T21:46:24.474+03:00",
+ "updated_at": "2026-09-18T00:40:38.685+03:00",
+ "current_user_can_bypass": "never",
+ "_links": {
+  "self": {
+   "href": "https://api.github.com/repos/anthropics/sandbox-runtime/rulesets/9143208"
+  },
+  "html": {
+   "href": "https://github.com/anthropics/sandbox-runtime/rules/9143208"
+  }
+ }
+}

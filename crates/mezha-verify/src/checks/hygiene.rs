@@ -17,7 +17,11 @@ const IGNORED: [&str; 2] = ["CLAUDE.local.md", ".claude/settings.local.json"];
 pub fn check(ctx: &Ctx) -> Check {
     let check = Check::new("git-hygiene", "committed and ignored files", Kind::Hygiene);
     let mut f = Findings::default();
-    let Some(git) = ctx.which("git") else {
+    let found = ctx.which_trusted("git");
+    if let Some(note) = found.skipped_note("git") {
+        f.warn(note, None);
+    }
+    let Some(git) = found.path else {
         f.warn("git is not on PATH", None);
         return f.into_check(check, "");
     };

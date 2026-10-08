@@ -73,6 +73,10 @@ enum Command {
         /// Look only at committed project files (for CI).
         #[arg(long)]
         project_only: bool,
+        /// Also run side-effect-free probes inside Anthropic's sandbox
+        /// runtime (srt 0.0.79 or later, macOS and Linux).
+        #[arg(long, conflicts_with = "project_only")]
+        probe: bool,
     },
     /// Run a hook (Claude Code calls this; see .claude/settings.json).
     #[command(hide = true)]
@@ -86,7 +90,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match &cli.command {
         Command::Hook { args } => return hook(args),
-        Command::Verify { json, project_only } => return verify(&cli.path, *json, *project_only),
+        Command::Verify {
+            json,
+            project_only,
+            probe,
+        } => return verify(&cli.path, *json, *project_only, *probe),
         _ => {}
     }
     match run(cli) {
@@ -111,10 +119,14 @@ fn hook(args: &[String]) -> ExitCode {
 }
 
 /// verify keeps its own exit codes: 0 pass, 1 a check failed, 2 couldn't run.
-fn verify(root: &Path, json: bool, project_only: bool) -> ExitCode {
+fn verify(root: &Path, json: bool, project_only: bool, probe: bool) -> ExitCode {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let ctx = mezha_verify::Ctx::from_process(&root);
-    match mezha_verify::verify(&ctx, &mezha_verify::Options { project_only }) {
+    let opts = mezha_verify::Options {
+        project_only,
+        probe,
+    };
+    match mezha_verify::verify(&ctx, &opts) {
         Ok(report) => {
             if json {
                 print!("{}", report.to_json());

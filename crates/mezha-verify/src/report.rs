@@ -2,8 +2,15 @@
 
 use serde::Serialize;
 
-/// Bumped whenever the JSON shape changes incompatibly.
+/// Bumped whenever the JSON shape changes incompatibly (new fields aren't).
 pub const JSON_VERSION: u32 = 1;
+
+/// Kinds of evidence behind a check's status.
+pub const STATIC: &str = "static";
+/// Shown by running something inside `srt`.
+pub const PROBE: &str = "probe";
+/// Reported by the forge's API.
+pub const SERVER: &str = "server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -48,6 +55,8 @@ pub struct Check {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
+    /// What the status rests on: [`STATIC`], [`PROBE`], [`SERVER`].
+    pub evidence: Vec<&'static str>,
 }
 
 impl Check {
@@ -59,6 +68,7 @@ impl Check {
             status: Status::Pass,
             detail: String::new(),
             fix: None,
+            evidence: vec![STATIC],
         }
     }
 
@@ -66,6 +76,7 @@ impl Check {
         Check {
             status: Status::Skip,
             detail: why.to_string(),
+            evidence: Vec::new(),
             ..Check::new(id, title, kind)
         }
     }
@@ -131,6 +142,8 @@ pub struct Report {
     pub platform: &'static str,
     pub claude_code: Option<String>,
     pub mode: &'static str,
+    /// The sandbox runtime `--probe` ran in, such as `srt 0.0.79`.
+    pub probe: Option<String>,
     pub checks: Vec<Check>,
     pub summary: Summary,
     pub notes: Vec<String>,
@@ -160,6 +173,18 @@ impl Report {
         }
     }
 
+    /// Strips credentials from every piece of text in the report.
+    pub fn redact(&mut self) {
+        for check in &mut self.checks {
+            check.detail = redact(&check.detail);
+            check.fix = check.fix.as_deref().map(redact);
+        }
+        for note in &mut self.notes {
+            *note = redact(note);
+        }
+        self.probe = self.probe.as_deref().map(redact);
+    }
+
     pub fn to_json(&self) -> String {
         let mut text = serde_json::to_string_pretty(self).expect("report serializes");
         text.push('\n');
@@ -168,14 +193,18 @@ impl Report {
 
     pub fn to_human(&self, root: &str) -> String {
         let mut out = format!(
-            "mezha verify: {root} ({}, Claude Code {}{})\n",
+            "mezha verify: {root} ({}, Claude Code {}{}{})\n",
             self.platform,
             self.claude_code.as_deref().unwrap_or("not found"),
             if self.mode == "project-only" {
                 ", project files only"
             } else {
                 ""
-            }
+            },
+            self.probe
+                .as_deref()
+                .map(|p| format!(", probed in {p}"))
+                .unwrap_or_default()
         );
         let width = self.checks.iter().map(|c| c.id.len()).max().unwrap_or(0);
         for check in &self.checks {
@@ -202,22 +231,26 @@ impl Report {
 }
 
 /// Removes userinfo from URLs (`https://user:token@host` → `https://host`)
-/// so no credential reaches the output.
+/// so no credential reaches the output. A password may hold a `/`
+/// (`https://u:a/b@host`): when the text before the first `/` has a `:` and
+/// no `@`, everything up to the URL's last `@` goes.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
-        let end = tail
-            .find(|c: char| c == '/' || c.is_whitespace() || c == '"' || c == '\'')
+        let token_end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`'))
             .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        match authority.rfind('@') {
-            Some(at) => out.push_str(&authority[at + 1..]),
-            None => out.push_str(authority),
-        }
-        rest = &tail[end..];
+        let token = &tail[..token_end];
+        let authority = &token[..token.find('/').unwrap_or(token.len())];
+        let skip = match authority.rfind('@') {
+            Some(at) => at + 1,
+            None if authority.contains(':') => token.rfind('@').map_or(0, |at| at + 1),
+            None => 0,
+        };
+        rest = &tail[skip..];
     }
     out.push_str(rest);
     out
@@ -238,6 +271,43 @@ mod tests {
             "https://h/x and ssh://h:22/r"
         );
         assert_eq!(redact("no urls here"), "no urls here");
+        assert_eq!(
+            redact("url https://u:pa/ss@github.com/o/r.git, then"),
+            "url https://github.com/o/r.git, then"
+        );
+        assert_eq!(
+            redact("'https://u:a/b/c@h/x' and https://h:8443/x"),
+            "'https://h/x' and https://h:8443/x"
+        );
+        assert_eq!(
+            redact("see https://proxy/?to=https://u:p@h/x"),
+            "see https://proxy/?to=https://h/x"
+        );
+    }
+
+    #[test]
+    fn report_redaction_covers_every_text() {
+        let secret = "https://x:ghp_s/cret@github.com/o/r";
+        let mut check = Check::new("x", "X", Kind::Boundary);
+        check.detail = format!("detail {secret}");
+        check.fix = Some(format!("fix {secret}"));
+        let mut report = Report {
+            version: JSON_VERSION,
+            mezha: "0",
+            hook_protocol: 1,
+            platform: "linux",
+            claude_code: None,
+            mode: "full",
+            probe: Some(format!("srt {secret}")),
+            checks: vec![check],
+            summary: Summary::default(),
+            notes: vec![format!("note {secret}")],
+        };
+        report.redact();
+        let json = report.to_json();
+        assert!(!json.contains("ghp_s"), "{json}");
+        assert!(!json.contains("cret"), "{json}");
+        assert_eq!(report.checks[0].evidence, [STATIC]);
     }
 
     #[test]

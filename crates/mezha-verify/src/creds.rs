@@ -70,14 +70,7 @@ impl Withheld {
         let disabled = layers
             .every("/sandbox/filesystem/disabled")
             .any(|(v, l)| v == &Value::Bool(true) && !l.scope.is_repository());
-        let resolve = |p: &str| -> Option<PathBuf> {
-            let path = ctx.expand(p)?;
-            Some(if path.is_relative() {
-                ctx.root.join(path)
-            } else {
-                path
-            })
-        };
+        let resolve = |p: &str| ctx.resolve(p);
         for (entry, _) in layers.every("/sandbox/credentials/files") {
             for item in entry.as_array().into_iter().flatten() {
                 if item["mode"] == "deny"
@@ -246,6 +239,25 @@ pub fn inventory(
     inv
 }
 
+/// The forge token variables set in the context.
+pub fn forge_token_vars(ctx: &Ctx) -> Vec<String> {
+    ctx.vars
+        .iter()
+        .filter(|(name, value)| {
+            !value.is_empty()
+                && (FORGE_ENV.contains(&name.as_str()) || looks_like_forge_token(name))
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// The file a `store --file PATH` credential helper keeps, if it is one.
+pub fn store_helper_file(helper: &str) -> Option<String> {
+    let program = first_word(helper);
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(&program);
+    matches!(base, "store" | "git-credential-store").then(|| store_file(helper))?
+}
+
 fn looks_like_forge_token(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     let forge = ["GITHUB", "GH_", "GITLAB", "GITEA", "BITBUCKET", "FORGEJO"]
@@ -257,7 +269,7 @@ fn looks_like_forge_token(name: &str) -> bool {
     forge && secret
 }
 
-fn gh_hosts_file(ctx: &Ctx) -> Option<PathBuf> {
+pub(crate) fn gh_hosts_file(ctx: &Ctx) -> Option<PathBuf> {
     let dir = ctx
         .var("GH_CONFIG_DIR")
         .map(PathBuf::from)
@@ -435,6 +447,7 @@ mod tests {
             platform,
             managed_dir: None,
             mezha_exe: None,
+            agent_writable: Vec::new(),
         }
     }
 

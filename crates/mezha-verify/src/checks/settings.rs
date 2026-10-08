@@ -2,7 +2,6 @@
 //! to, and does the gate in it actually block? Only mezha's own render is
 //! ever run, never a command found on disk.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use mezha_render::Rendered;
@@ -14,6 +13,7 @@ use crate::ctx::{Ctx, Platform};
 use crate::layers::PROJECT_SETTINGS;
 use crate::report::{Check, Findings, Kind};
 use crate::runner::{Run, run};
+use crate::scratch::Scratch;
 
 pub fn check(ctx: &Ctx, rendered: &Rendered, opts: &Options) -> Check {
     let check = Check::new(
@@ -66,7 +66,11 @@ pub fn check(ctx: &Ctx, rendered: &Rendered, opts: &Options) -> Check {
 fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
     let install =
         "Install it: `cargo install --locked --path crates/mezha-cli` in the mezha repository.";
-    let Some(mezha) = ctx.which("mezha") else {
+    let found = ctx.which_trusted("mezha");
+    if let Some(note) = found.skipped_note("mezha") {
+        f.warn(note, None);
+    }
+    let Some(mezha) = found.path else {
         f.warn(
             "`mezha` is not on PATH, so Claude Code will block every tool call (fail-closed)",
             Some(install.into()),
@@ -113,7 +117,11 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
         f.warn("the gate probe doesn't run on native Windows yet", None);
         return;
     }
-    let Some(bash) = ctx.which("bash") else {
+    let found = ctx.which_trusted("bash");
+    if let Some(note) = found.skipped_note("bash") {
+        f.warn(note, None);
+    }
+    let Some(bash) = found.path else {
         f.warn("bash is not on PATH, so the gate wasn't probed", None);
         return;
     };
@@ -124,14 +132,13 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
         );
         return;
     };
-    let scratch = scratch_dir();
-    if std::fs::create_dir_all(&scratch).is_err() {
+    let Ok(scratch) = Scratch::new("mezha-verify") else {
         f.warn(
             "couldn't create a scratch directory for the gate probe",
             None,
         );
         return;
-    }
+    };
     let mut wrong = Vec::new();
     for (cmd, expect) in [
         ("git push origin main", 2),
@@ -145,7 +152,7 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
             "tool_input": { "command": cmd },
             "cwd": ctx.root,
         });
-        let home = scratch.to_string_lossy().into_owned();
+        let home = scratch.path().to_string_lossy().into_owned();
         let root = ctx.root.to_string_lossy().into_owned();
         let out = run(
             ctx,
@@ -169,18 +176,11 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
             wrong.push(format!("`{cmd}` gave {got}, expected exit {expect}"));
         }
     }
-    let _ = std::fs::remove_dir_all(&scratch);
+    drop(scratch);
     if !wrong.is_empty() {
         f.fail(
             format!("the gate doesn't behave: {}", wrong.join(", ")),
             "Reinstall mezha and run `mezha compile`; if it persists, report a mezha bug.",
         );
     }
-}
-
-fn scratch_dir() -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    std::env::temp_dir().join(format!("mezha-verify-{}-{nanos}", std::process::id()))
 }

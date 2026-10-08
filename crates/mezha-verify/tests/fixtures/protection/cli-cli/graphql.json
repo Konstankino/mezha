@@ -1,0 +1,17 @@
+{
+ "data": {
+  "repository": {
+   "viewerPermission": "READ",
+   "defaultBranchRef": {
+    "name": "trunk",
+    "refUpdateRule": {
+     "requiredApprovingReviewCount": 1,
+     "requiresCodeOwnerReviews": true,
+     "allowsForcePushes": false,
+     "allowsDeletions": false,
+     "viewerCanPush": false
+    }
+   }
+  }
+ }
+}

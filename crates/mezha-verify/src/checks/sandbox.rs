@@ -109,6 +109,9 @@ pub fn check(ctx: &Ctx, layers: &Layers, claude: Option<&str>, opts: &Options) -
 
     if !opts.project_only {
         platform(ctx, &mut f);
+        if let Some(note) = ctx.which_trusted("claude").skipped_note("claude") {
+            f.warn(note, None);
+        }
         match claude {
             None => f.warn(
                 "the `claude` CLI isn't on PATH, so its version is unknown",
@@ -160,8 +163,15 @@ fn platform(ctx: &Ctx, f: &mut Findings) {
             }
         }
         Platform::Linux | Platform::Wsl2 => {
-            let bwrap = ctx.which("bwrap");
-            let socat = ctx.which("socat");
+            let mut found = |name: &str| {
+                let found = ctx.which_trusted(name);
+                if let Some(note) = found.skipped_note(name) {
+                    f.warn(note, None);
+                }
+                found.path
+            };
+            let bwrap = found("bwrap");
+            let socat = found("socat");
             if bwrap.is_none() || socat.is_none() {
                 f.fail(
                     "bubblewrap or socat is missing, so the sandbox can't start",
@@ -213,7 +223,7 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 
 /// The installed Claude Code version, if `claude` is on PATH.
 pub fn claude_version(ctx: &Ctx) -> Option<String> {
-    let claude = ctx.which("claude")?;
+    let claude = ctx.which_trusted("claude").path?;
     let out = run(
         ctx,
         &Run {

@@ -1,0 +1,83 @@
+[
+ {
+  "type": "repository_transfer",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "nodejs",
+  "ruleset_id": 17420826
+ },
+ {
+  "type": "repository_create",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "nodejs",
+  "ruleset_id": 17420826
+ },
+ {
+  "type": "repository_delete",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "nodejs",
+  "ruleset_id": 17420826
+ },
+ {
+  "type": "repository_visibility",
+  "parameters": {
+   "public": true,
+   "internal": false,
+   "private": false
+  },
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "nodejs",
+  "ruleset_id": 17420826
+ },
+ {
+  "type": "creation",
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "nodejs/node",
+  "ruleset_id": 714753
+ },
+ {
+  "type": "deletion",
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "nodejs/node",
+  "ruleset_id": 714773
+ },
+ {
+  "type": "pull_request",
+  "parameters": {
+   "required_approving_review_count": 1,
+   "dismiss_stale_reviews_on_push": false,
+   "required_reviewers": [],
+   "require_code_owner_review": false,
+   "dismissal_restriction": {
+    "enabled": false,
+    "allowed_actors": []
+   },
+   "require_last_push_approval": true,
+   "required_review_thread_resolution": false,
+   "require_extra_approval_for_unattributed_changes": true,
+   "allowed_merge_methods": [
+    "squash"
+   ]
+  },
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "nodejs/node",
+  "ruleset_id": 4562796
+ },
+ {
+  "type": "required_linear_history",
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "nodejs/node",
+  "ruleset_id": 714811
+ },
+ {
+  "type": "commit_message_pattern",
+  "parameters": {
+   "operator": "regex",
+   "pattern": "\\nPR-URL: https://github\\.com/nodejs(-private)?/node(-private)?/pull/\\d+(\\n|$)",
+   "negate": false,
+   "name": "Commit message must contain a valid PR-URL"
+  },
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "nodejs/node",
+  "ruleset_id": 2603
+ }
+]

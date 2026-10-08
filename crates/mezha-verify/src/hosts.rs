@@ -77,7 +77,9 @@ pub struct Remote {
 impl Remote {
     /// Understands `https://[user[:pass]@]host[:port]/path`,
     /// `ssh://[user@]host[:port]/path`, scp-like `user@host:path`, and local
-    /// paths.
+    /// paths. A URL that could make git run a command or read as an option
+    /// (`ext::`, `fd::`, whitespace, control characters, a leading `-`), or
+    /// whose host isn't a plain name, is `Other` with no host.
     pub fn parse(url: &str) -> Remote {
         let local = Remote {
             scheme: Scheme::Local,
@@ -85,7 +87,25 @@ impl Remote {
             port: 0,
             has_secret: false,
         };
+        let other = Remote {
+            scheme: Scheme::Other,
+            ..local.clone()
+        };
         let url = url.trim();
+        if url.contains("::")
+            || url.starts_with('-')
+            || url.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return other;
+        }
+        let remote = Remote::parse_plain(url, local);
+        if !remote.host.is_empty() && !plain_host(&remote.host) {
+            return other;
+        }
+        remote
+    }
+
+    fn parse_plain(url: &str, local: Remote) -> Remote {
         if let Some((scheme, rest)) = url.split_once("://") {
             let scheme_kind = match scheme.to_ascii_lowercase().as_str() {
                 "https" => Scheme::Https,
@@ -147,11 +167,12 @@ impl Remote {
             port: 443,
         };
         match self.host.as_str() {
-            "github.com" => {
+            "github.com" | "ssh.github.com" => {
                 endpoints.extend([
                     https("github.com"),
                     https("api.github.com"),
                     https("uploads.github.com"),
+                    https("ssh.github.com"),
                 ]);
             }
             "gitlab.com" => endpoints.push(https("gitlab.com")),
@@ -165,6 +186,15 @@ impl Remote {
         endpoints.dedup();
         endpoints
     }
+}
+
+/// A DNS name or IPv4 address: letters, digits, dots, hyphens and
+/// underscores, not starting with a hyphen.
+fn plain_host(host: &str) -> bool {
+    !host.starts_with('-')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 fn split_port(hostport: &str) -> (&str, Option<u16>) {
@@ -236,6 +266,28 @@ mod tests {
         assert_eq!(Remote::parse("/srv/git/r.git").scheme, Scheme::Local);
         assert_eq!(Remote::parse("file:///srv/r").scheme, Scheme::Local);
         assert_eq!(Remote::parse("../r").scheme, Scheme::Local);
+        let r = Remote::parse("ssh://git@ssh.github.com:443/o/r.git");
+        assert_eq!((r.host.as_str(), r.port), ("ssh.github.com", 443));
+    }
+
+    #[test]
+    fn urls_that_run_commands_or_read_as_options_are_other() {
+        for url in [
+            "ext::sh -c touch% /tmp/pwned",
+            "ext::ssh -o ProxyCommand=x github.com %S",
+            "fd::7",
+            "-oProxyCommand=x:o/r",
+            "https://github.com/o/r\nevil",
+            "https://github.com/o r",
+            "https://github.com/o/r\u{7}",
+            "ssh://-oProxyCommand=x/r",
+            "https://$(id).example/r",
+            "git@$(id):o/r",
+        ] {
+            let r = Remote::parse(url);
+            assert_eq!((r.scheme, r.host.as_str()), (Scheme::Other, ""), "{url}");
+            assert!(r.write_endpoints().is_empty(), "{url}");
+        }
     }
 
     #[test]
@@ -251,6 +303,7 @@ mod tests {
                 "api.github.com:443",
                 "github.com:22",
                 "github.com:443",
+                "ssh.github.com:443",
                 "uploads.github.com:443"
             ]
         );

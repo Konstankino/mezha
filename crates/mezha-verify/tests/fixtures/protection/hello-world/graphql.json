@@ -1,0 +1,11 @@
+{
+ "data": {
+  "repository": {
+   "viewerPermission": "READ",
+   "defaultBranchRef": {
+    "name": "master",
+    "refUpdateRule": null
+   }
+  }
+ }
+}

@@ -23,7 +23,8 @@ Every security feature is either a boundary or labelled advisory. Today:
 | Forge hosts kept out of `egress_allow` | **Boundary** (sandbox on) | The sandbox proxy refuses hosts that aren't allowed, so a push can't connect. On macOS this is the only push boundary: the sandbox can't hide the keychain. |
 | Sandbox `filesystem.denyWrite` on `~/.mezha` | **Boundary** (sandbox on) | The OS stops sandboxed commands from writing the approval store, so an agent can't approve itself. |
 | `deny_reads` and credential paths as `Read(...)` deny rules | **Boundary** for sandboxed commands | Claude Code merges them into the sandbox's read restrictions; for the Read tool, which runs outside the sandbox, they are permission rules. |
-| `mezha verify` | Proof | Fails when the sandbox is off or weakened in any settings file, when an agent could push, or when the gate was edited or switched off. |
+| Branch protection on GitHub (`branch-protection` in verify) | **Boundary** (server) | GitHub refuses direct pushes to the default branch and asks code owners to review. verify reads it with your `gh` (queries only) and warns when your own token could bypass it. It limits what a push can break; it doesn't make a push impossible. |
+| `mezha verify` | Proof | Fails when the sandbox is off or weakened in any settings file, when an agent could push, or when the gate was edited or switched off. With `--probe` it shows the network and credential parts inside `srt` instead of only reasoning about them. |
 | Git guard rail in `env` (no credential helper, no askpass) | *Advisory* | It closes accidental helper use, but a command can name a helper itself (`git -c credential.helper=...`). |
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
@@ -39,8 +40,8 @@ only from the directory it starts in, so start it in the project root.
 Withholding credentials means the agent can't push, fetch from private
 remotes, run `gh` or sign commits in the sandbox, even with an approval: a
 human does those from their own terminal ([ADR-0003](docs/adr/0003-push-boundary.md)).
-Not here yet: branch protection checks and `mezha verify --probe` (step 1b),
-and the approval broker with short-lived tokens.
+Not here yet: `mezha verify --inside` (step 1c) and the approval broker with
+short-lived tokens.
 
 ## Install
 
@@ -77,6 +78,46 @@ mezha approve --minutes 30
 
 `mezha approve --status` shows what is left; `mezha approve --revoke` ends it.
 
+## Probing the boundary
+
+`mezha verify` reasons from the settings. `mezha verify --probe` also runs
+probes inside Anthropic's sandbox runtime, `srt`, started with the sandbox
+settings as mezha reads them:
+
+- a `git push --dry-run` to each push remote that deletes a ref that doesn't
+  exist, so nothing is ever sent, from a scratch repository outside the
+  project;
+- a check of which credential files a sandboxed command can read and which
+  token variables it sees.
+
+A credential that reaches a server fails `push-boundary` as "shown in srt".
+The probe can't see the macOS keychain, how Claude Code itself merges the
+settings, or ssh on macOS (which always fails inside srt);
+[ADR-0003](docs/adr/0003-push-boundary.md) has the details.
+
+It needs, on macOS and Linux only:
+
+- Node 22.12 or later and `npm i -g @anthropic-ai/sandbox-runtime@0.0.79`;
+- on Linux, also `bwrap`, `socat` and `rg`, and on Ubuntu 24.04 and later
+  unprivileged user namespaces for bwrap
+  (`kernel.apparmor_restrict_unprivileged_userns`).
+
+Without a usable `srt`, verify exits 2 and says why. Run it from your own
+terminal. Inside Claude Code it works only from a `!` command, which runs
+unsandboxed.
+
+A quick manual check:
+
+1. With `egress_allow = []`, `mezha verify --probe` shows `push-boundary`
+   passing with "shown closed in srt".
+2. With `egress_allow = ["github.com"]` on macOS, `push-boundary` fails on
+   the keychain finding (static), and the probe shows the network open.
+3. The same on Linux passes, with "in srt no credential was readable".
+
+verify only runs `srt`, `gh`, `git` and the other tools it uses when they
+sit outside places an agent can write: the project, `$TMPDIR`, the sandbox's
+`allowWrite` paths, and directories the group or everyone can write.
+
 ## Commands
 
 | Command | What it does |
@@ -85,7 +126,7 @@ mezha approve --minutes 30
 | `mezha compile` | Validates the spec and writes the generated files. Writes nothing if a generated file was written or edited by someone else. |
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
-| `mezha verify [--json] [--project-only]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). |
+| `mezha verify [--json] [--project-only \| --probe]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt` ([Probing the boundary](#probing-the-boundary)). |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -139,7 +180,10 @@ cargo fmt --all --check
 
 The end-to-end tests (`crates/mezha-cli/tests/e2e_hooks.rs`, Unix only) run
 the hook command from a generated `settings.json` verbatim under bash, with
-and without `mezha` on `PATH`. Don't run `mezha compile` in this repository
+and without `mezha` on `PATH`. `crates/mezha-verify/tests/probe.rs` runs the
+probe's scripts against real git with local listeners (no network, no srt);
+`boundary.rs` drives verify with stand-in `gh` and `srt` that answer from
+GitHub responses recorded in `tests/fixtures/protection`. Don't run `mezha compile` in this repository
 itself: with a broken or missing binary, the fail-closed hook would block
 your own session.
 

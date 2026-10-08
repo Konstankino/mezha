@@ -166,6 +166,35 @@ impl Layers {
             .collect()
     }
 
+    /// Where an agent may write besides the project and `TMPDIR`:
+    /// `sandbox.filesystem.allowWrite` and the `Edit(...)` allow rules
+    /// (Claude Code adds those to the sandbox's writable paths too), from
+    /// every scope. A glob is cut back to the text before its first
+    /// wildcard.
+    pub fn agent_writable(&self, ctx: &Ctx) -> Vec<PathBuf> {
+        let cut = |p: &str| p.find(['*', '?', '[']).map_or(p, |i| &p[..i]).to_string();
+        let mut paths: Vec<PathBuf> = self
+            .strings("/sandbox/filesystem/allowWrite")
+            .into_iter()
+            .filter_map(|(p, _)| ctx.resolve(&cut(p)))
+            .collect();
+        for (rule, _) in self.strings("/permissions/allow") {
+            let Some(p) = rule.strip_prefix("Edit(").and_then(|r| r.strip_suffix(')')) else {
+                continue;
+            };
+            // In a rule, `/x` is relative to the project and `//x` absolute.
+            let p = cut(p);
+            let p = match p.strip_prefix('/') {
+                Some(rest) if !rest.starts_with('/') => rest.to_string(),
+                _ => p,
+            };
+            paths.extend(ctx.resolve(&p));
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// While managed settings forbid unsandboxed commands or lock the
     /// domains, Claude Code ignores repository settings that loosen the
     /// sandbox.
@@ -259,6 +288,47 @@ mod tests {
     }
 
     #[test]
+    fn agent_writable_paths() {
+        let layers = Layers {
+            layers: vec![
+                layer(
+                    Scope::User,
+                    json!({"sandbox": {"filesystem": {"allowWrite": ["~/.cache/**", "/opt/out", "build"]}}}),
+                ),
+                layer(
+                    Scope::Local,
+                    json!({"permissions": {"allow": ["Edit(/docs/**)", "Edit(//srv/x/*.md)", "Read(/y)"]}}),
+                ),
+            ],
+            ..Layers::default()
+        };
+        let ctx = Ctx {
+            root: PathBuf::from("/w/repo"),
+            vars: Default::default(),
+            home: Some(PathBuf::from("/h")),
+            platform: Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+        let paths: Vec<String> = layers
+            .agent_writable(&ctx)
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/h/.cache/",
+                "/opt/out",
+                "/srv/x/",
+                "/w/repo/build",
+                "/w/repo/docs/"
+            ]
+        );
+    }
+
+    #[test]
     fn reads_files_and_reports_broken_ones() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
@@ -286,6 +356,7 @@ mod tests {
             platform: Platform::Linux,
             managed_dir: Some(managed),
             mezha_exe: None,
+            agent_writable: Vec::new(),
         };
         let layers = Layers::load(&ctx, false);
         let values: Vec<i64> = layers

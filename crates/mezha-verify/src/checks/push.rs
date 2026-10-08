@@ -1,13 +1,17 @@
 //! `push-boundary`: can a sandboxed command push? A push needs a forge
 //! write endpoint the sandbox can reach and a credential it can reach; the
-//! verdict follows the table in ADR-0003.
+//! verdict follows the table in ADR-0003. With `--probe`, what srt showed
+//! joins what the settings say: a credential that reached a server fails
+//! outright, an endpoint either reading finds open counts as open, and the
+//! two readings disagreeing is a warning.
 
 use crate::Options;
 use crate::creds::Inventory;
 use crate::gitcfg::GitConfig;
 use crate::hosts::{Endpoint, Pattern, Remote, github_endpoints};
 use crate::layers::Layers;
-use crate::report::{Check, Findings, Kind, Status};
+use crate::probe::{self, NetResult};
+use crate::report::{self, Check, Findings, Kind, Status};
 
 /// The hosts sandboxed commands may reach: `allowedDomains` from every
 /// scope plus `WebFetch(domain:...)` allow rules, minus `deniedDomains`.
@@ -71,9 +75,13 @@ pub fn check(
     git: Option<&GitConfig>,
     inventory: &Inventory,
     sandbox_in_effect: bool,
+    probe: Option<&probe::Facts>,
     opts: &Options,
 ) -> Check {
-    let check = Check::new("push-boundary", "an agent can't push", Kind::Boundary);
+    let mut check = Check::new("push-boundary", "an agent can't push", Kind::Boundary);
+    if probe.is_some() {
+        check.evidence.push(report::PROBE);
+    }
     let mut f = Findings::default();
     if !sandbox_in_effect {
         f.fail(
@@ -99,57 +107,155 @@ pub fn check(
     }
 
     let network = Network::from_layers(layers);
-    let open: Vec<String> = endpoints
+    let close = "Remove these hosts from egress_allow in mezha.toml (and any WebFetch(domain:...) allow rule), or remove the credentials listed.";
+    // With a custom proxy, srt's own proxy says nothing about the real one.
+    let results: Vec<&NetResult> = match (probe, &network.unknown) {
+        (Some(p), None) => p.network.iter().collect(),
+        _ => Vec::new(),
+    };
+    let shown: Vec<String> = results
+        .iter()
+        .filter(|r| r.outcome.credential_shown())
+        .map(|r| format!("{}: {}", r.target.endpoint, r.outcome.describe()))
+        .collect();
+    if !shown.is_empty() {
+        f.fail(
+            format!(
+                "shown in srt with the settings as mezha reads them: {}",
+                shown.join("; ")
+            ),
+            close,
+        );
+        return f.into_check(check, "");
+    }
+
+    let probed = |open: bool| -> Vec<Endpoint> {
+        results
+            .iter()
+            .filter(|r| r.outcome.network_open() == Some(open))
+            .map(|r| r.target.endpoint.clone())
+            .collect()
+    };
+    let (probed_open, probed_closed) = (probed(true), probed(false));
+    let mut differ: Vec<String> = Vec::new();
+    for e in &probed_closed {
+        if network.reaches(e) {
+            differ.push(format!("srt refused {e}, which mezha's reading allows"));
+        }
+    }
+    for e in &probed_open {
+        if !network.reaches(e) {
+            differ.push(format!("srt reached {e}, which mezha's reading blocks"));
+        }
+    }
+    differ.extend(probe.iter().flat_map(|p| p.disagree.iter().cloned()));
+    if !differ.is_empty() {
+        f.warn(
+            format!(
+                "srt and mezha's reading of the settings differ: {}",
+                differ.join("; ")
+            ),
+            Some("Report this as a mezha bug, with the settings involved.".into()),
+        );
+    }
+
+    // Open by either reading counts as open.
+    let mut open: Vec<Endpoint> = endpoints
         .iter()
         .filter(|e| network.reaches(e))
-        .map(ToString::to_string)
+        .cloned()
+        .chain(probed_open)
         .collect();
+    open.sort();
+    open.dedup();
+    let open: Vec<String> = open.iter().map(ToString::to_string).collect();
     let hosts = |list: &[String]| list.join(", ");
     if open.is_empty() && network.unknown.is_none() {
         let all: Vec<String> = endpoints.iter().map(ToString::to_string).collect();
-        return f.into_check(
-            check,
-            &format!("sandboxed commands can't reach {}", hosts(&all)),
-        );
+        let mut text = format!("sandboxed commands can't reach {}", hosts(&all));
+        if !probed_closed.is_empty() {
+            let shown: Vec<String> = probed_closed.iter().map(ToString::to_string).collect();
+            text.push_str(&format!(" (shown closed in srt: {})", shown.join(", ")));
+        }
+        f.add(Status::Pass, text, None);
+        add_probe_summary(&mut f, probe, &network);
+        return f.into_check(check, "");
     }
     let reach = match (&network.unknown, open.is_empty()) {
         (Some(why), true) => format!("network reach is unknown ({why})"),
         (Some(why), false) => format!("sandboxed commands can reach {} ({why})", hosts(&open)),
         (None, _) => format!("sandboxed commands can reach {}", hosts(&open)),
     };
-    let close = "Remove these hosts from egress_allow in mezha.toml (and any WebFetch(domain:...) allow rule), or remove the credentials listed.";
+    let proven: &[String] = probe.map_or(&[], |p| &p.proven);
+    let probe_unknown: &[String] = probe.map_or(&[], |p| &p.unknown);
 
     if opts.project_only {
         f.warn(
             format!("{reach}; whether a push gets through depends on each machine's credentials"),
             Some("Run `mezha verify` on each machine that runs Claude Code.".into()),
         );
-    } else if !inventory.reachable.is_empty() {
+    } else if !inventory.reachable.is_empty() || !proven.is_empty() {
+        let mut found = inventory.reachable.clone();
+        if !proven.is_empty() {
+            found.push(format!("shown readable in srt: {}", proven.join(", ")));
+        }
         f.fail(
             format!(
                 "{reach}, and these credentials are reachable: {}",
-                inventory.reachable.join("; ")
+                found.join("; ")
             ),
             close,
         );
-    } else if !inventory.unknown.is_empty() {
+    } else if !inventory.unknown.is_empty() || !probe_unknown.is_empty() {
+        let unknown: Vec<String> = inventory
+            .unknown
+            .iter()
+            .chain(probe_unknown)
+            .cloned()
+            .collect();
         f.add(
             Status::Warn,
             format!(
                 "unverified: {reach}, and these credential sources can't be judged: {}",
-                inventory.unknown.join("; ")
+                unknown.join("; ")
             ),
             Some(close.into()),
         );
     } else {
+        let srt = if probe.is_some_and(|p| p.creds_checked) {
+            "; in srt no credential was readable"
+        } else {
+            ""
+        };
         f.add(
             Status::Pass,
             format!(
-                "{reach}, but no credential is reachable (checked: {})",
+                "{reach}, but no credential is reachable (checked: {}{srt})",
                 inventory.checked.join(", ")
             ),
             None,
         );
     }
+    add_probe_summary(&mut f, probe, &network);
     f.into_check(check, "")
+}
+
+/// What each network probe came to, for the detail.
+fn add_probe_summary(f: &mut Findings, probe: Option<&probe::Facts>, network: &Network) {
+    let Some(probe) = probe else {
+        return;
+    };
+    let text = match &network.unknown {
+        Some(why) => format!("srt: the network probe is inconclusive ({why})"),
+        None if probe.network.is_empty() => return,
+        None => {
+            let each: Vec<String> = probe
+                .network
+                .iter()
+                .map(|r| format!("{} {}", r.target.endpoint, r.outcome.describe()))
+                .collect();
+            format!("srt: {}", each.join("; "))
+        }
+    };
+    f.add(Status::Pass, text, None);
 }

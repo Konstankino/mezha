@@ -148,6 +148,7 @@ mod tests {
             platform: crate::ctx::Platform::detect(),
             managed_dir: None,
             mezha_exe: None,
+            agent_writable: Vec::new(),
         }
     }
 

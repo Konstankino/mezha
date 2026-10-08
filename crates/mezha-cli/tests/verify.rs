@@ -112,4 +112,36 @@ fn json_report_has_a_stable_shape() {
         );
     }
     assert_eq!(report["summary"]["fail"], 0);
+    assert_eq!(report["probe"], Value::Null);
+    assert_eq!(
+        report["checks"][0]["evidence"],
+        serde_json::json!(["static"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_without_srt_cannot_run() {
+    let p = compiled();
+    // No srt on this PATH, whatever the machine running the tests has.
+    let out = p.mezha_env(&["verify", "--probe"], &[("PATH", "/usr/bin:/bin")]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("--probe can't run"), "{err}");
+    assert!(
+        err.contains("npm i -g @anthropic-ai/sandbox-runtime@0.0.79"),
+        "{err}"
+    );
+}
+
+#[test]
+fn probe_and_project_only_do_not_go_together() {
+    let p = compiled();
+    let out = p.mezha(&["verify", "--probe", "--project-only"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("cannot be used with"),
+        "{}",
+        stderr(&out)
+    );
 }

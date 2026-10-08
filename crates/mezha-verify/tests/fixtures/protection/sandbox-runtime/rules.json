@@ -1,0 +1,157 @@
+[
+ {
+  "type": "repository_visibility",
+  "parameters": {
+   "public": true,
+   "internal": false,
+   "private": true
+  },
+  "ruleset_source_type": "Enterprise",
+  "ruleset_source": "anthropic",
+  "ruleset_id": 19692204
+ },
+ {
+  "type": "pull_request",
+  "parameters": {
+   "required_approving_review_count": 1,
+   "dismiss_stale_reviews_on_push": false,
+   "required_reviewers": [],
+   "require_code_owner_review": true,
+   "require_last_push_approval": false,
+   "required_review_thread_resolution": false,
+   "require_extra_approval_for_unattributed_changes": true,
+   "allowed_merge_methods": [
+    "merge",
+    "squash",
+    "rebase"
+   ]
+  },
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 4126768
+ },
+ {
+  "type": "deletion",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 22991241
+ },
+ {
+  "type": "non_fast_forward",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 22991241
+ },
+ {
+  "type": "pull_request",
+  "parameters": {
+   "required_approving_review_count": 1,
+   "dismiss_stale_reviews_on_push": true,
+   "required_reviewers": [],
+   "require_code_owner_review": true,
+   "require_last_push_approval": true,
+   "required_review_thread_resolution": false,
+   "require_extra_approval_for_unattributed_changes": true,
+   "allowed_merge_methods": [
+    "merge",
+    "squash",
+    "rebase"
+   ]
+  },
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 4127247
+ },
+ {
+  "type": "deletion",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 22991243
+ },
+ {
+  "type": "non_fast_forward",
+  "ruleset_source_type": "Organization",
+  "ruleset_source": "anthropics",
+  "ruleset_id": 22991243
+ },
+ {
+  "type": "deletion",
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "anthropics/sandbox-runtime",
+  "ruleset_id": 9143208
+ },
+ {
+  "type": "non_fast_forward",
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "anthropics/sandbox-runtime",
+  "ruleset_id": 9143208
+ },
+ {
+  "type": "pull_request",
+  "parameters": {
+   "required_approving_review_count": 1,
+   "dismiss_stale_reviews_on_push": false,
+   "required_reviewers": [],
+   "require_code_owner_review": false,
+   "dismissal_restriction": {
+    "enabled": false,
+    "allowed_actors": []
+   },
+   "require_last_push_approval": false,
+   "required_review_thread_resolution": false,
+   "require_extra_approval_for_unattributed_changes": true,
+   "allowed_merge_methods": [
+    "merge",
+    "squash",
+    "rebase"
+   ]
+  },
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "anthropics/sandbox-runtime",
+  "ruleset_id": 9143208
+ },
+ {
+  "type": "required_status_checks",
+  "parameters": {
+   "strict_required_status_checks_policy": false,
+   "do_not_enforce_on_create": false,
+   "required_status_checks": [
+    {
+     "context": "Tests (docker / arm64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (docker / x86-64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (linux / arm64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (linux / x86-64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (macos / arm64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (macos / x86-64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (windows / arm64)",
+     "integration_id": 15368
+    },
+    {
+     "context": "Tests (windows / x86-64)",
+     "integration_id": 15368
+    }
+   ]
+  },
+  "ruleset_source_type": "Repository",
+  "ruleset_source": "anthropics/sandbox-runtime",
+  "ruleset_id": 9143208
+ }
+]

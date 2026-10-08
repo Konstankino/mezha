@@ -1,0 +1,17 @@
+{
+ "data": {
+  "repository": {
+   "viewerPermission": "READ",
+   "defaultBranchRef": {
+    "name": "main",
+    "refUpdateRule": {
+     "requiredApprovingReviewCount": 0,
+     "requiresCodeOwnerReviews": false,
+     "allowsForcePushes": true,
+     "allowsDeletions": false,
+     "viewerCanPush": false
+    }
+   }
+  }
+ }
+}

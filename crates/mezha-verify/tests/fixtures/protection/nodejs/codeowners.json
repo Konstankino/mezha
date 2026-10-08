@@ -1,0 +1,22 @@
+{
+ "errors": [
+  {
+   "line": 13,
+   "column": 21,
+   "source": "/.github/CODEOWNERS @nodejs/tsc\n",
+   "kind": "Unknown owner",
+   "suggestion": "make sure the team @nodejs/tsc exists, is publicly visible, and has write access to the repository",
+   "message": "Unknown owner on line 13: make sure the team @nodejs/tsc exists, is publicly visible, and has write access to the repository\n\n  /.github/CODEOWNERS @nodejs/tsc\n                      ^",
+   "path": ".github/CODEOWNERS"
+  },
+  {
+   "line": 14,
+   "column": 35,
+   "source": "/.github/PULL_REQUEST_TEMPLATE.md @nodejs/tsc\n",
+   "kind": "Unknown owner",
+   "suggestion": "make sure the team @nodejs/tsc exists, is publicly visible, and has write access to the repository",
+   "message": "Unknown owner on line 14: make sure the team @nodejs/tsc exists, is publicly visible, and has write access to the repository\n\n  /.github/PULL_REQUEST_TEMPLATE.md @nodejs/tsc\n                                    ^",
+   "path": ".github/CODEOWNERS"
+  }
+ ]
+}

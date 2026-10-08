@@ -43,7 +43,7 @@ const ENV_CONFIG: [&str; 5] = [
 impl GitConfig {
     /// Reads every scope (`local_only` = only the repository's own file).
     pub fn read(ctx: &Ctx, local_only: bool) -> Result<GitConfig, ReadError> {
-        let git = ctx.which("git").ok_or(ReadError::NoGit)?;
+        let git = ctx.which_trusted("git").path.ok_or(ReadError::NoGit)?;
         let mut args = vec!["-c", "core.fsmonitor=false", "config", "-z", "--list"];
         if local_only {
             args.push("--local");
