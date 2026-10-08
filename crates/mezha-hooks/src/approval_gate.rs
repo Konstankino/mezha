@@ -110,9 +110,10 @@ fn gate_command(
                 Outcome::allow()
             } else {
                 Outcome::block(format!(
-                    "mezha: `{}` needs a human approval first. Ask the user to run \
-                     `mezha approve --minutes 30` in their own terminal (not through Claude), \
-                     then try again.\n{ADVISORY}",
+                    "mezha: `{}` is gated. Ask the user to run it in their own terminal: \
+                     the sandbox withholds credentials, so it fails from here even after an \
+                     approval. `mezha approve --minutes 30`, run by the user, only lifts this \
+                     gate.\n{ADVISORY}",
                     gates[i]
                 ))
             }

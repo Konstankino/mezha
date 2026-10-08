@@ -248,3 +248,52 @@ fn symlinks_are_refused() {
         Err(WriteError::Refused { .. })
     ));
 }
+
+#[test]
+fn credentials_are_withheld_from_the_sandbox_and_the_read_tool() {
+    use mezha_render::settings::{CREDENTIAL_ENV, CREDENTIAL_FILES, GIT_GUARD_ENV, read_rule};
+    let v: serde_json::Value = serde_json::from_str(&rendered().files[SETTINGS]).unwrap();
+    let creds = &v["sandbox"]["credentials"];
+    for (path, is_dir) in CREDENTIAL_FILES {
+        assert!(
+            creds["files"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({ "path": path, "mode": "deny" })),
+            "{path}"
+        );
+        let rule = read_rule(path, is_dir);
+        assert!(
+            v["permissions"]["deny"]
+                .as_array()
+                .unwrap()
+                .contains(&rule.clone().into()),
+            "{rule}"
+        );
+    }
+    for name in CREDENTIAL_ENV {
+        assert!(
+            creds["envVars"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({ "name": name, "mode": "deny" })),
+            "{name}"
+        );
+    }
+    for (key, value) in GIT_GUARD_ENV {
+        assert_eq!(v["env"][key], value, "{key}");
+    }
+
+    // Without the sandbox, the Read rules and the git guard rail stay.
+    let off = rendered_from(
+        "[project]\nname = \"p\"\n[policy]\nsandbox = false\npermissions_ask = [\"git push\"]\n",
+    );
+    let v: serde_json::Value = serde_json::from_str(&off.files[SETTINGS]).unwrap();
+    assert!(
+        v["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .contains(&"Read(~/.ssh/**)".into())
+    );
+    assert_eq!(v["env"]["GIT_CONFIG_KEY_0"], "credential.helper");
+}

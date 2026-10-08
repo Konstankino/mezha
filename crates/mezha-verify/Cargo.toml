@@ -1,6 +1,6 @@
 [package]
 name = "mezha-verify"
-description = "Mezha verify: boundary tests (phase 1)"
+description = "Mezha verify: tests that fail when the boundary is broken"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+mezha-spec.workspace = true
+mezha-render.workspace = true
+mezha-hooks.workspace = true
+mezha-broker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

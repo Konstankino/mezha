@@ -68,7 +68,8 @@ pub fn run(path: &Path, minutes: u32, status: bool, revoke: bool) -> Result<Exit
     }
     approvals::grant(&home, &root, minutes, now).map_err(sandbox_hint)?;
     println!(
-        "Approved gated commands for {} for {minutes} minute(s). `mezha approve --revoke` ends it early.",
+        "Approved gated commands for {} for {minutes} minute(s). `mezha approve --revoke` ends it early.\n\
+         Sandboxed commands still can't reach your credentials, so a push from Claude Code fails by design: push from your own terminal.",
         root.display()
     );
     Ok(ExitCode::SUCCESS)

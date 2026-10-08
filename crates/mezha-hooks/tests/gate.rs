@@ -83,11 +83,8 @@ fn a_push_needs_an_approval() {
     let f = Fixture::new();
     let out = f.fire(bash("git push origin main"));
     assert!(out.is_block());
-    assert!(
-        out.stderr.contains("`git push` needs a human approval"),
-        "{}",
-        out.stderr
-    );
+    assert!(out.stderr.contains("`git push` is gated"), "{}", out.stderr);
+    assert!(out.stderr.contains("own terminal"));
     assert!(out.stderr.contains("mezha approve --minutes 30"));
     assert!(out.stderr.contains("advisory"));
 

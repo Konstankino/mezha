@@ -63,6 +63,17 @@ enum Command {
         #[arg(long, conflicts_with = "minutes")]
         revoke: bool,
     },
+    /// Check that the boundary holds: the sandbox is in effect, an agent
+    /// can't push, and nothing switched the gate off. Exit 0 = pass (maybe
+    /// with warnings), 1 = a check failed, 2 = verify couldn't run.
+    Verify {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Look only at committed project files (for CI).
+        #[arg(long)]
+        project_only: bool,
+    },
     /// Run a hook (Claude Code calls this; see .claude/settings.json).
     #[command(hide = true)]
     Hook {
@@ -73,8 +84,10 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Command::Hook { args } = &cli.command {
-        return hook(args);
+    match &cli.command {
+        Command::Hook { args } => return hook(args),
+        Command::Verify { json, project_only } => return verify(&cli.path, *json, *project_only),
+        _ => {}
     }
     match run(cli) {
         Ok(code) => code,
@@ -97,6 +110,26 @@ fn hook(args: &[String]) -> ExitCode {
     ExitCode::from(outcome.code as u8)
 }
 
+/// verify keeps its own exit codes: 0 pass, 1 a check failed, 2 couldn't run.
+fn verify(root: &Path, json: bool, project_only: bool) -> ExitCode {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let ctx = mezha_verify::Ctx::from_process(&root);
+    match mezha_verify::verify(&ctx, &mezha_verify::Options { project_only }) {
+        Ok(report) => {
+            if json {
+                print!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_human(&root.display().to_string()));
+            }
+            ExitCode::from(report.exit_code() as u8)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.path;
     match cli.command {
@@ -109,7 +142,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             status,
             revoke,
         } => approve::run(&root, minutes, status, revoke),
-        Command::Hook { .. } => unreachable!("handled in main"),
+        Command::Hook { .. } | Command::Verify { .. } => unreachable!("handled in main"),
     }
 }
 

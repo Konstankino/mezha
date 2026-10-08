@@ -18,6 +18,7 @@ mezha-spec.workspace = true
 mezha-render.workspace = true
 mezha-hooks.workspace = true
 mezha-broker.workspace = true
+mezha-verify.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 

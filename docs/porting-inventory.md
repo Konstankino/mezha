@@ -54,14 +54,20 @@ archetypes and their TOML seeds.
   loading state. Mezha: names are lowercase-only, so TOML's duplicate-key
   check covers it.
 
-## ocgen layers deferred to phase 1
+## ocgen layers revisited in phase 1
 
-These are what actually make an agent's push fail, which is why week 1's push
-gate is labelled advisory:
+See [ADR-0003](adr/0003-push-boundary.md).
 
-- **The git pre-push hook**, which catches a push however it is phrased.
-- **Withholding credentials from sandboxed commands.** ocgen wrote
-  `sandbox.credentials` into project settings. Current Claude Code (v2.1.246
-  and later) ignores `credentials` entries in project and local settings, so
-  mezha has to place them in user or managed settings, and `verify` has to
-  prove the result with a `git push --dry-run` from inside the sandbox.
+- **Withholding credentials from sandboxed commands: kept.** ocgen wrote
+  `sandbox.credentials` into project settings, and Claude Code honours those
+  `deny` entries: it merges them from every scope it loads, and no scope can
+  remove one. They are dropped only when the project source is excluded with
+  `--setting-sources` (v2.1.246 and later). mezha renders the same block,
+  plus matching `Read(...)` deny rules, because the Read tool runs outside
+  the sandbox.
+- **The keychain reset (`GIT_CONFIG_*` in settings `env`): kept, as
+  advisory.** On macOS the sandbox can't hide the keychain (ocgen commit
+  `1efb776`), and a command can still name a helper itself.
+- **The git pre-push hook: dropped.** `git push --no-verify` and
+  `git -c core.hooksPath=/dev/null push` skip it, so it is one more advisory
+  layer, not part of the boundary.

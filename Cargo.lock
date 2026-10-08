@@ -304,6 +304,7 @@ dependencies = [
  "mezha-hooks",
  "mezha-render",
  "mezha-spec",
+ "mezha-verify",
  "serde_json",
  "tempfile",
 ]
@@ -361,6 +362,15 @@ dependencies = [
 [[package]]
 name = "mezha-verify"
 version = "0.0.1"
+dependencies = [
+ "mezha-broker",
+ "mezha-hooks",
+ "mezha-render",
+ "mezha-spec",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "once_cell"

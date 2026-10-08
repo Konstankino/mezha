@@ -19,20 +19,28 @@ Every security feature is either a boundary or labelled advisory. Today:
 
 | Feature | Kind | Why |
 |---|---|---|
+| Credentials withheld from sandboxed commands (`sandbox.credentials`) | **Boundary** (sandbox on) | The OS hides the known credential files and token variables from the agent's shell commands. |
+| Forge hosts kept out of `egress_allow` | **Boundary** (sandbox on) | The sandbox proxy refuses hosts that aren't allowed, so a push can't connect. On macOS this is the only push boundary: the sandbox can't hide the keychain. |
 | Sandbox `filesystem.denyWrite` on `~/.mezha` | **Boundary** (sandbox on) | The OS stops sandboxed commands from writing the approval store, so an agent can't approve itself. |
-| Approval store outside the repository | **Boundary** (sandbox on) | It isn't in the working tree an agent may edit. |
-| `deny_reads` as `Read(...)` deny rules | **Boundary** for sandboxed commands | Claude Code merges them into the sandbox's read restrictions; for file tools they are permission rules. |
+| `deny_reads` and credential paths as `Read(...)` deny rules | **Boundary** for sandboxed commands | Claude Code merges them into the sandbox's read restrictions; for the Read tool, which runs outside the sandbox, they are permission rules. |
+| `mezha verify` | Proof | Fails when the sandbox is off or weakened in any settings file, when an agent could push, or when the gate was edited or switched off. |
+| Git guard rail in `env` (no credential helper, no askpass) | *Advisory* | It closes accidental helper use, but a command can name a helper itself (`git -c credential.helper=...`). |
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | `mezha approve` refusing inside Claude Code | Speed bump | The boundary is the store's location, not this check. |
 | Anything on native Windows | *Advisory* | No sandbox, and hooks may run in PowerShell 5.1, which can't fail closed. `compile` refuses `os_mode = "native-windows"` until phase 4; use WSL2. |
 
-Not here yet (phase 1): withholding credentials from sandboxed commands,
-branch protection checks, `mezha verify`, and the approval broker with
-short-lived tokens. Until then **an agent's `git push` is stopped by an
-advisory gate only**. The strongest setup today: the agent commits, a human
-pushes.
+The sandbox wraps shell commands only. Claude's file tools, WebFetch, MCP
+servers and hooks run outside it: an MCP server with a GitHub token can push
+through the API whatever the sandbox says. Claude Code reads project settings
+only from the directory it starts in, so start it in the project root.
+
+Withholding credentials means the agent can't push, fetch from private
+remotes, run `gh` or sign commits in the sandbox, even with an approval: a
+human does those from their own terminal ([ADR-0003](docs/adr/0003-push-boundary.md)).
+Not here yet: branch protection checks and `mezha verify --probe` (step 1b),
+and the approval broker with short-lived tokens.
 
 ## Install
 
@@ -54,8 +62,14 @@ mezha compile     # writes .claude/settings.json and .claude/.mezha-state.json
 ```
 
 Edit `mezha.toml` between the two. Start a new Claude Code session afterwards,
-since hooks load at startup. When the agent needs to push, run this in your
-own terminal, not through Claude:
+since hooks load at startup. Then check that the boundary holds:
+
+```bash
+mezha verify
+```
+
+Pushes happen from your own terminal. To lift the gate for commands that
+don't need credentials, run this yourself, not through Claude:
 
 ```bash
 mezha approve --minutes 30
@@ -71,6 +85,7 @@ mezha approve --minutes 30
 | `mezha compile` | Validates the spec and writes the generated files. Writes nothing if a generated file was written or edited by someone else. |
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
+| `mezha verify [--json] [--project-only]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -82,12 +97,14 @@ mezha approve --minutes 30
   - `permissions.ask`: the gated commands, edits to `mezha.toml` and the
     settings files, and `mezha compile/apply/init`, so an agent can't quietly
     remove a gate;
-  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, and the
-    `deny_reads` patterns;
+  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, the
+    `deny_reads` patterns, and reads of known credential files;
+  - `env`: git starts with no credential helper, no askpass and no terminal
+    prompt (advisory);
   - `sandbox` (when `policy.sandbox = true`): enabled, no unsandboxed
     retries, no silent fallback when the sandbox can't start, `egress_allow`
-    as the allowed hosts, and writes to `~/.mezha`, `mezha.toml` and the
-    state file denied;
+    as the allowed hosts, writes to `~/.mezha`, `mezha.toml` and the state
+    file denied, and credential files and token variables withheld;
   - one `PreToolUse` hook on every tool: the approval gate.
 - `.claude/.mezha-state.json`: SHA-256 fingerprints of the generated files.
   It tells mezha's own output from a hand edit; it is not a tamper check.
@@ -127,8 +144,10 @@ itself: with a broken or missing binary, the fail-closed hook would block
 your own session.
 
 The workspace has eight crates: `mezha-spec`, `mezha-render`, `mezha-hooks`,
-`mezha-broker` and `mezha` (the CLI) do the work; `mezha-verify`,
-`mezha-memory` and `mezha-metrics` are placeholders for later phases.
+`mezha-broker`, `mezha-verify` and `mezha` (the CLI) do the work;
+`mezha-memory` and `mezha-metrics` are placeholders for later phases. The
+boundary scenarios verify must fail on live in
+`crates/mezha-verify/tests/boundary.rs`.
 
 ## Documents
 
@@ -137,5 +156,7 @@ The workspace has eight crates: `mezha-spec`, `mezha-render`, `mezha-hooks`,
   governance and memory, not a generator.
 - [ADR-0002](docs/adr/0002-fail-closed-hook-command.md): the fail-closed hook
   command.
+- [ADR-0003](docs/adr/0003-push-boundary.md): the push boundary and what
+  `mezha verify` checks.
 - [Porting inventory](docs/porting-inventory.md): what comes from ocgen, and
   what doesn't.

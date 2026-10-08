@@ -2,7 +2,7 @@
 //! and limited to keys Claude Code documents.
 
 use mezha_spec::{CommandPrefix, Spec};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 pub const SCHEMA_URL: &str = "https://json.schemastore.org/claude-code-settings.json";
 
@@ -27,6 +27,94 @@ const ASK_COMMANDS: [&str; 3] = [
 /// settings and `.git/hooks` on its own.
 const DENY_WRITE: [&str; 3] = ["~/.mezha", "./mezha.toml", "./.claude/.mezha-state.json"];
 
+/// Credential files and directories withheld from the agent, as
+/// `(path, is_dir)`. The sandbox hides them from shell commands and a
+/// `Read(...)` deny rule hides them from the Read tool, which runs outside
+/// the sandbox. `mezha verify` checks against the same list (ADR-0003).
+pub const CREDENTIAL_FILES: [(&str, bool); 25] = [
+    ("~/.ssh", true),
+    ("~/.gnupg", true),
+    ("~/.aws", true),
+    ("~/.azure", true),
+    ("~/.config/gcloud", true),
+    ("~/.kube", true),
+    ("~/.config/gh", true),
+    ("~/.config/glab-cli", true),
+    ("~/.config/hub", false),
+    ("~/.config/op", true),
+    ("~/.gcm", true),
+    ("~/.password-store", true),
+    ("~/.netrc", false),
+    ("~/.git-credentials", false),
+    ("~/.config/git/credentials", false),
+    ("~/.docker/config.json", false),
+    ("~/.npmrc", false),
+    ("~/.yarnrc.yml", false),
+    ("~/.cargo/credentials", false),
+    ("~/.cargo/credentials.toml", false),
+    ("~/.pypirc", false),
+    ("~/.gem/credentials", false),
+    ("~/.terraform.d/credentials.tfrc.json", false),
+    ("~/.pulumi/credentials.json", false),
+    ("~/.vault-token", false),
+];
+
+/// Environment variables removed from sandboxed commands: tokens, and the
+/// sockets and handles that lead to one (ssh-agent, VS Code's git askpass,
+/// Windows interop from WSL).
+pub const CREDENTIAL_ENV: [&str; 29] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "HOMEBREW_GITHUB_API_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "GITLAB_TOKEN",
+    "GL_TOKEN",
+    "CI_JOB_TOKEN",
+    "GITEA_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "YARN_NPM_AUTH_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "TWINE_USERNAME",
+    "TWINE_PASSWORD",
+    "PYPI_TOKEN",
+    "UV_PUBLISH_TOKEN",
+    "POETRY_PYPI_TOKEN_PYPI",
+    "SSH_AUTH_SOCK",
+    "VSCODE_GIT_IPC_HANDLE",
+    "VSCODE_GIT_ASKPASS_MAIN",
+    "VSCODE_GIT_ASKPASS_NODE",
+    "WSL_INTEROP",
+];
+
+/// Git starts with no credential helper, no askpass and no terminal prompt.
+/// An empty `credential.helper` read after every config file resets the
+/// helpers before it, per-URL ones included. Advisory: a command can still
+/// name a helper itself (`git -c credential.helper=...`).
+pub const GIT_GUARD_ENV: [(&str, &str); 5] = [
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "credential.helper"),
+    ("GIT_CONFIG_VALUE_0", ""),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", ""),
+];
+
+/// The `Read(...)` deny rule hiding a credential path from the Read tool.
+pub fn read_rule(path: &str, is_dir: bool) -> String {
+    if is_dir {
+        format!("Read({path}/**)")
+    } else {
+        format!("Read({path})")
+    }
+}
+
 pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
     let mut ask: Vec<String> = gates.iter().map(|g| format!("Bash({g} *)")).collect();
     ask.extend(ASK_EDITS.iter().chain(&ASK_COMMANDS).map(|s| s.to_string()));
@@ -36,9 +124,16 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
         "Edit(~/.mezha/**)".to_string(),
     ];
     deny.extend(spec.policy.deny_reads.iter().map(|p| format!("Read({p})")));
+    deny.extend(CREDENTIAL_FILES.iter().map(|&(p, dir)| read_rule(p, dir)));
+
+    let env: Map<String, Value> = GIT_GUARD_ENV
+        .iter()
+        .map(|&(k, v)| (k.to_string(), Value::from(v)))
+        .collect();
 
     let mut settings = json!({
         "$schema": SCHEMA_URL,
+        "env": env,
         "permissions": { "ask": ask, "deny": deny },
         "hooks": {
             "PreToolUse": [{
@@ -51,6 +146,14 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
         },
     });
     if spec.policy.sandbox {
+        let files: Vec<Value> = CREDENTIAL_FILES
+            .iter()
+            .map(|&(path, _)| json!({ "path": path, "mode": "deny" }))
+            .collect();
+        let vars: Vec<Value> = CREDENTIAL_ENV
+            .iter()
+            .map(|name| json!({ "name": name, "mode": "deny" }))
+            .collect();
         settings["sandbox"] = json!({
             "enabled": true,
             // Strict: no unsandboxed retry, and no silent fallback to running
@@ -60,6 +163,7 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
             "failIfUnavailable": true,
             "network": { "allowedDomains": spec.policy.egress_allow },
             "filesystem": { "denyWrite": DENY_WRITE },
+            "credentials": { "files": files, "envVars": vars },
         });
     }
     settings
