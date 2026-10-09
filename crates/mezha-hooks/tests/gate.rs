@@ -180,6 +180,19 @@ fn no_tool_may_touch_the_store() {
     );
 }
 
+/// A symlink in the project to an approval that doesn't exist yet: writing
+/// through it would create the approval.
+#[cfg(unix)]
+#[test]
+fn dangling_symlinks_into_the_store_block() {
+    let f = Fixture::new();
+    let target = approvals::store_dir(&f.home).join("forged.json");
+    let link = f.repo.join("innocent.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let out = f.fire(tool("Write", json!({ "file_path": link })));
+    assert!(out.is_block(), "{out:?}");
+}
+
 #[cfg(any(target_os = "macos", windows))]
 #[test]
 fn store_check_ignores_case_where_the_file_system_does() {

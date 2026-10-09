@@ -22,6 +22,9 @@ pub struct Output {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    /// [`run_lines`]: the line callback asked to stop, and the process was
+    /// killed.
+    pub stopped: bool,
 }
 
 impl Output {
@@ -43,29 +46,7 @@ pub struct Run<'a> {
 }
 
 pub fn run(ctx: &Ctx, spec: &Run<'_>) -> std::io::Result<Output> {
-    let mut cmd = Command::new(spec.program);
-    cmd.args(spec.args)
-        .current_dir(spec.cwd)
-        .env_clear()
-        .envs(
-            ctx.vars
-                .iter()
-                .filter(|(k, _)| !spec.remove.contains(&k.as_str())),
-        )
-        .envs(spec.env.iter().copied())
-        .env("LC_ALL", "C")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd.spawn()?;
-
-    let input = spec.stdin.to_vec();
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
+    let mut child = spawn(ctx, spec)?;
     let out_rx = drain(child.stdout.take().expect("piped stdout"));
     let err_rx = drain(child.stderr.take().expect("piped stderr"));
 
@@ -91,7 +72,132 @@ pub fn run(ctx: &Ctx, spec: &Run<'_>) -> std::io::Result<Output> {
         stdout,
         stderr,
         timed_out,
+        stopped: false,
     })
+}
+
+/// What a line callback wants next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Continue,
+    Stop,
+}
+
+/// Stdout lines longer than this are dropped by [`run_lines`].
+const LINE_CAP: usize = 8 << 20;
+
+/// Like [`run`] for a long-running child that reports as it goes: each
+/// stdout line goes to `on_line` as it arrives and none is kept.
+/// [`Next::Stop`] kills the process group at once.
+pub fn run_lines(
+    ctx: &Ctx,
+    spec: &Run<'_>,
+    mut on_line: impl FnMut(&str) -> Next,
+) -> std::io::Result<Output> {
+    let mut child = spawn(ctx, spec)?;
+    let (tx, lines) = mpsc::channel::<String>();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match (&mut stdout)
+                .take(LINE_CAP as u64 + 1)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) | Err(_) => break,
+                Ok(_) if line.len() > LINE_CAP => {
+                    // Skip the rest of an overlong line.
+                    let mut rest = Vec::new();
+                    if stdout.read_until(b'\n', &mut rest).is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {
+                    if tx
+                        .send(String::from_utf8_lossy(&line).into_owned())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let err_rx = drain(child.stderr.take().expect("piped stderr"));
+
+    let deadline = Instant::now() + spec.timeout;
+    let (mut timed_out, mut stopped) = (false, false);
+    let status = loop {
+        match lines.recv_timeout(Duration::from_millis(10)) {
+            Ok(line) => {
+                if on_line(line.trim_end_matches(['\n', '\r'])) == Next::Stop {
+                    stopped = true;
+                    kill_tree(&mut child);
+                    break None;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Stdout closed: the child is done or about to be.
+                if let Some(status) = child.try_wait()? {
+                    break Some(status);
+                }
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            // Lines still in the channel belong to the run.
+            while let Ok(line) = lines.recv_timeout(Duration::from_millis(200)) {
+                if on_line(line.trim_end_matches(['\n', '\r'])) == Next::Stop {
+                    stopped = true;
+                    break;
+                }
+            }
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            kill_tree(&mut child);
+            break None;
+        }
+    };
+    let stderr = err_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    Ok(Output {
+        code: status.and_then(|s| s.code()),
+        stdout: String::new(),
+        stderr,
+        timed_out,
+        stopped,
+    })
+}
+
+fn spawn(ctx: &Ctx, spec: &Run<'_>) -> std::io::Result<std::process::Child> {
+    let mut cmd = Command::new(spec.program);
+    cmd.args(spec.args)
+        .current_dir(spec.cwd)
+        .env_clear()
+        .envs(
+            ctx.vars
+                .iter()
+                .filter(|(k, _)| !spec.remove.contains(&k.as_str())),
+        )
+        .envs(spec.env.iter().copied())
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn()?;
+    let input = spec.stdin.to_vec();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    Ok(child)
 }
 
 fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<String> {
@@ -117,7 +223,12 @@ fn kill_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         // The child leads its own process group; take the group down with it.
-        let _ = Command::new("kill")
+        // By absolute path: PATH may hold a directory an agent can write.
+        let kill = ["/bin/kill", "/usr/bin/kill"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+            .unwrap_or("/bin/kill");
+        let _ = Command::new(kill)
             .args(["-KILL", "--", &format!("-{}", child.id())])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -194,6 +305,46 @@ mod tests {
         let out = sh("sleep 30 & sleep 30", Duration::from_millis(300));
         assert!(out.timed_out);
         assert_eq!(out.code, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn lines_arrive_as_they_come_and_stop_kills() {
+        let spec = |script: &'static str| -> (Vec<String>, Output) {
+            let mut seen = Vec::new();
+            let out = run_lines(
+                &ctx(),
+                &Run {
+                    program: Path::new("/bin/sh"),
+                    args: &["-c", script],
+                    cwd: Path::new("/"),
+                    env: &[],
+                    remove: &[],
+                    stdin: b"in",
+                    timeout: Duration::from_secs(10),
+                },
+                |line| {
+                    seen.push(line.to_string());
+                    if line == "stop" {
+                        Next::Stop
+                    } else {
+                        Next::Continue
+                    }
+                },
+            )
+            .unwrap();
+            (seen, out)
+        };
+        let (seen, out) = spec("echo a; cat; echo; echo b >&2; exit 4");
+        assert_eq!(seen, ["a", "in"]);
+        assert_eq!(
+            (out.code, out.stderr.as_str(), out.stopped),
+            (Some(4), "b\n", false)
+        );
+        let started = Instant::now();
+        let (seen, out) = spec("echo stop; sleep 30; echo late");
+        assert_eq!(seen, ["stop"]);
+        assert!(out.stopped && out.code.is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

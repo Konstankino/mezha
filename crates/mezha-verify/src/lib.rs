@@ -128,12 +128,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         checks::layers::check(ctx, &layers, opts),
         checks::hygiene::check(ctx, &spec, &rendered),
         protection,
-        Check::skip(
-            "dreamer",
-            "the dreamer can't run commands",
-            Kind::Integrity,
-            "arrives in step 2b",
-        ),
+        checks::dreamer::check(ctx, &spec, opts),
         checks::plugin::check(ctx, opts),
     ];
     let mut notes = Vec::new();

@@ -1,0 +1,1 @@
+{"userType": "external", "entrypoint": "cli", "version": "2.1.285", "gitBranch": "main", "uuid": "x1", "type": "user", "timestamp": "2026-10-08T13:00:00Z", "sessionId": "s3", "cwd": "/Users/test/proj-foo", "message": {"role": "user", "content": "other project"}, "origin": {"kind": "human"}}

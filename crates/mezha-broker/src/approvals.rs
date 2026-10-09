@@ -43,9 +43,14 @@ fn root_key(root: &Path) -> String {
     }
 }
 
+/// The name mezha files a project under in `~/.mezha`: the SHA-256 of its
+/// root, spelled one way per folder.
+pub fn root_hash(root: &Path) -> String {
+    crate::sha256_hex(root_key(root).as_bytes())
+}
+
 fn record_path(home: &Path, root: &Path) -> PathBuf {
-    let name = crate::sha256_hex(root_key(root).as_bytes());
-    store_dir(home).join(format!("{name}.json"))
+    store_dir(home).join(format!("{}.json", root_hash(root)))
 }
 
 /// Grants an approval for `root` that ends `minutes` from `now` (Unix

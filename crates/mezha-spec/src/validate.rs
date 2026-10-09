@@ -15,6 +15,11 @@ pub const KNOWLEDGE_DESCRIPTION_MIN: usize = 40;
 /// Every agent's description is in Claude's listing on every turn.
 pub const AGENT_DESCRIPTION_LONG: usize = 1024;
 
+/// The most one role's dream may be allowed to cost, in US dollars.
+pub const DREAM_BUDGET_MAX_USD: f64 = 50.0;
+/// The most turns one role's dream may be allowed.
+pub const DREAM_MAX_TURNS_LIMIT: u32 = 200;
+
 /// Programs whose `Bash(...)` scope still allows any command.
 const INTERPRETERS: [&str; 9] = [
     "sh", "bash", "zsh", "env", "eval", "xargs", "sudo", "exec", "command",
@@ -96,6 +101,7 @@ pub fn validate(spec: &Spec) -> Diagnostics {
     }
     project(spec, &mut d);
     policy(spec, &mut d);
+    memory(spec, &mut d);
     agents(spec, &mut d);
     skills(spec, &mut d);
     rules(spec, &mut d);
@@ -151,6 +157,43 @@ fn policy(spec: &Spec, d: &mut Diagnostics) {
             "policy.sandbox",
             "the sandbox is off: agent commands can write the approval store, so the \
              `git push` gate is advisory only",
+            None,
+        );
+    }
+}
+
+/// The dreamer's settings: they become `claude` arguments.
+fn memory(spec: &Spec, d: &mut Diagnostics) {
+    let memory = &spec.memory;
+    if let Some(model) = &memory.dream_model
+        && (model.is_empty()
+            || model.starts_with('-')
+            || model.chars().any(|c| c.is_whitespace() || c.is_control()))
+    {
+        d.error(
+            "memory.dream_model",
+            format!(
+                "`{}` is not a model name: it must be non-empty, without whitespace, and not start with `-`",
+                model.escape_debug()
+            ),
+            Some(r#"use an alias such as "sonnet" or a full model name"#),
+        );
+    }
+    if let Some(budget) = memory.dream_budget_usd
+        && !(budget.is_finite() && budget > 0.0 && budget <= DREAM_BUDGET_MAX_USD)
+    {
+        d.error(
+            "memory.dream_budget_usd",
+            format!("must be more than 0 and at most {DREAM_BUDGET_MAX_USD}"),
+            None,
+        );
+    }
+    if let Some(turns) = memory.dream_max_turns
+        && !(1..=DREAM_MAX_TURNS_LIMIT).contains(&turns)
+    {
+        d.error(
+            "memory.dream_max_turns",
+            format!("must be between 1 and {DREAM_MAX_TURNS_LIMIT}"),
             None,
         );
     }

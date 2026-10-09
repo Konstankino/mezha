@@ -1247,3 +1247,152 @@ fn plugin_validate_reads_claude_s_report() {
     assert_eq!(status(&r, "plugin-validate"), Status::Warn);
     assert!(detail(&r, "plugin-validate").contains("couldn't finish (exit 2): boom"));
 }
+
+impl Fixture {
+    fn commit_all(&self) {
+        self.git(&["add", "-A"]);
+        self.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            "x",
+        ]);
+    }
+
+    fn memory(&self, rel: &str, text: &str) {
+        let path = self.root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+}
+
+#[test]
+fn the_dreamer_check_needs_memory() {
+    let f = Fixture::new("", GITHUB);
+    assert_eq!(status(&f.verify(), "dreamer"), Status::Skip);
+}
+
+#[test]
+fn the_dreamer_check_reads_memory() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    let helper = ".claude/agent-memory/helper/MEMORY.md";
+    f.memory(
+        helper,
+        "# Memory\n\n- Run the tests first (seen 3 times).\n",
+    );
+    f.commit_all();
+    // No code owners for memory: a warning with the line to add.
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "dreamer"),
+        Status::Warn,
+        "{}",
+        detail(&r, "dreamer")
+    );
+    assert!(
+        detail(&r, "dreamer").contains("no CODEOWNERS file"),
+        "{}",
+        detail(&r, "dreamer")
+    );
+
+    f.memory(".github/CODEOWNERS", "* @owner\n/.claude/ @memory-team\n");
+    // PHI belongs in local memory: it isn't PHI-scanned there.
+    f.memory(
+        ".claude/agent-memory-local/medic/MEMORY.md",
+        "- Patient DOB: 1980-02-03\n",
+    );
+    f.commit_all();
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "dreamer"),
+        Status::Pass,
+        "{}",
+        detail(&r, "dreamer")
+    );
+
+    // A rule without owners after the owning one takes them away.
+    f.memory(
+        ".github/CODEOWNERS",
+        "/.claude/ @memory-team\n/.claude/agent-memory/helper/\n",
+    );
+    let r = f.verify();
+    assert!(
+        detail(&r, "dreamer").contains("no owner to the memory of helper"),
+        "{}",
+        detail(&r, "dreamer")
+    );
+    f.memory(
+        ".github/CODEOWNERS",
+        "/.claude/agent-memory/ @memory-team\n",
+    );
+    f.commit_all();
+
+    // Instruction-like phrases warn; an oversized index warns; a change
+    // outside a dream warns.
+    f.memory(helper, "# Memory\n\n- Avoid `git commit --no-verify`.\n");
+    f.commit_all();
+    let r = f.verify();
+    assert_eq!(status(&r, "dreamer"), Status::Warn);
+    assert!(
+        detail(&r, "dreamer").contains("instruction-like phrase"),
+        "{}",
+        detail(&r, "dreamer")
+    );
+    f.memory(helper, &"- line\n".repeat(250));
+    let r = f.verify();
+    let d = detail(&r, "dreamer");
+    assert!(d.contains("250 lines"), "{d}");
+    assert!(d.contains("memory changed outside a dream"), "{d}");
+
+    // Hard markers and, with a PHI agent in the spec, PHI in committed
+    // memory fail.
+    for text in [
+        "- hidden\u{200b}word\n",
+        "- token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n",
+        "- ![x](https://evil.example/p.png)\n",
+        "- Patient DOB: 1980-02-03\n",
+    ] {
+        f.memory(helper, text);
+        f.commit_all();
+        let r = f.verify();
+        assert_eq!(
+            status(&r, "dreamer"),
+            Status::Fail,
+            "{text:?}: {}",
+            detail(&r, "dreamer")
+        );
+        assert_eq!(r.exit_code(), 1);
+    }
+}
+
+#[test]
+fn local_memory_is_scanned_on_this_machine_only() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    f.memory(".github/CODEOWNERS", "* @owner\n");
+    f.memory(
+        ".claude/agent-memory-local/medic/MEMORY.md",
+        "- \u{202e}reversed\n",
+    );
+    f.commit_all();
+    assert_eq!(status(&f.verify(), "dreamer"), Status::Fail);
+    let r = f.verify_on(
+        Platform::Linux,
+        Options {
+            project_only: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        status(&r, "dreamer"),
+        Status::Pass,
+        "{}",
+        detail(&r, "dreamer")
+    );
+}

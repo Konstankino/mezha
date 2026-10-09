@@ -2,13 +2,14 @@
 //! active `mezha approve`, the agent may not approve itself, and no tool may
 //! touch `~/.mezha`. Anything it can't make sense of is blocked.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use mezha_broker::approvals;
 use mezha_spec::CommandPrefix;
 use serde_json::{Map, Value};
 
 use crate::matcher::{self, Hit};
+use crate::paths::{resolve, within};
 use crate::{Env, MAX_INPUT, Outcome};
 
 pub const NAME: &str = "approval-gate";
@@ -144,50 +145,4 @@ fn store_path<'a>(
             };
             within(&resolve(&path), &store)
         })
-}
-
-/// Removes `.` and `..` without touching the disk, then resolves symlinks in
-/// the longest prefix that exists.
-fn resolve(path: &Path) -> PathBuf {
-    let mut lexical = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                lexical.pop();
-            }
-            other => lexical.push(other),
-        }
-    }
-    let mut existing = lexical.as_path();
-    let mut missing = Vec::new();
-    loop {
-        if let Ok(canonical) = std::fs::canonicalize(existing) {
-            let mut full = canonical;
-            full.extend(missing.iter().rev());
-            return full;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return lexical,
-        }
-    }
-}
-
-fn within(path: &Path, dir: &Path) -> bool {
-    let norm = |p: &Path| {
-        let s = p.to_string_lossy().replace('\\', "/");
-        let s = s.strip_prefix("//?/").map(str::to_string).unwrap_or(s);
-        if cfg!(any(target_os = "macos", windows)) {
-            s.to_lowercase()
-        } else {
-            s
-        }
-    };
-    let (path, dir) = (norm(path), norm(dir));
-    let dir = dir.trim_end_matches('/');
-    path == dir || path.starts_with(&format!("{dir}/"))
 }

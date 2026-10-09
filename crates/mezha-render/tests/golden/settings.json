@@ -39,6 +39,7 @@
     "deny": [
       "Bash(mezha approve *)",
       "Edit(~/.mezha/**)",
+      "Read(~/.mezha/dreams/**)",
       "Edit(/.claude/agent-memory/**)",
       "Edit(/.claude/agent-memory-local/**)",
       "Edit(~/.claude/agent-memory/**)",

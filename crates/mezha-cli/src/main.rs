@@ -1,6 +1,7 @@
 //! `mezha`: a boundary, not a matcher.
 
 mod approve;
+mod dream;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -62,6 +63,26 @@ enum Command {
         /// End the current approval now.
         #[arg(long, conflicts_with = "minutes")]
         revoke: bool,
+    },
+    /// Turn recent agent runs into reviewed memory. Project memory becomes
+    /// a commit on a new branch for you to push; local and user memory is
+    /// applied after you confirm the diff. Run it in your own terminal.
+    Dream {
+        /// Dream only this role (repeatable). Default: every agent with memory.
+        #[arg(long = "role", value_name = "NAME")]
+        roles: Vec<String>,
+        /// Read runs that ended after this: 7d, 12h, 2026-10-01 or an ISO
+        /// time. Default: where the last dream of each role stopped, or 7d.
+        #[arg(long)]
+        since: Option<String>,
+        /// The commit the dream branch starts from. Default: origin/HEAD,
+        /// else HEAD.
+        #[arg(long)]
+        base: Option<String>,
+        /// Collect the digests and show what would run, without running the
+        /// dreamer.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check that the boundary holds: the sandbox is in effect, an agent
     /// can't push, and nothing switched the gate off. Exit 0 = pass (maybe
@@ -162,6 +183,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             status,
             revoke,
         } => approve::run(&root, minutes, status, revoke),
+        Command::Dream {
+            roles,
+            since,
+            base,
+            dry_run,
+        } => dream::run(
+            &root,
+            &dream::Options {
+                roles,
+                since,
+                base,
+                dry_run,
+            },
+        ),
         Command::Hook { .. } | Command::Verify { .. } => unreachable!("handled in main"),
     }
 }

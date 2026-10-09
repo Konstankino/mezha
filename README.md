@@ -10,7 +10,7 @@ give the tool its name:
 2. An agent's knowledge is what survives **past the session's boundary**
    (skills, rules, memory a human has reviewed).
 
-Status: **pre-alpha**, the first week of [`mezha-plan.md`](mezha-plan.md).
+Status: **pre-alpha**, phase 2 of [`mezha-plan.md`](mezha-plan.md).
 Nothing is published yet.
 
 ## What is a boundary and what is advisory
@@ -31,6 +31,13 @@ Every security feature is either a boundary or labelled advisory. Today:
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
+| A dream writes only the role's staged memory | **Boundary** (Claude Code permissions) | The dreamer runs as `claude -p --restricted` with `dontAsk`, no prompts, five file tools and one allow rule; mezha stops it if Claude Code reports other tools, MCP servers or another mode. See [Dreams](#dreams). |
+| mezha's review of a dream | Integrity | mezha, not the model, reads the staged memory once, refuses anything but flat Markdown files and a clean worktree, and commits exactly the bytes it read, with the repository's git hooks off. |
+| Code owners review memory changes | **Boundary** (server) | With `/.claude/agent-memory/` in CODEOWNERS and code owner reviews required, a dream branch needs their approval to land. verify warns until it is set up. |
+| Dream digests under `~/.mezha/dreams` | **Boundary** for sandboxed writes | The sandbox can't write `~/.mezha`, so a session can't plant digests; a deny rule keeps sessions from reading them. |
+| PHI memory stays local | **Boundary** (local scope) | PHI memory is never committed: the spec forces local scope and verify fails if local memory isn't git-ignored. |
+| The `dream-guard` hook | *Advisory* | It checks each of the dreamer's file paths, fail-closed, but a hook reads paths, so it backs up the permissions rather than replacing them. |
+| Injection, secret and PHI scans | *Advisory* | Patterns. They redact digests and refuse a dream with hidden characters, secrets or remote images, but they can miss things: read every dream diff. |
 | An agent's `Bash(...)` scope (`agent-bash` hook) | *Advisory* | Claude Code can't scope an agent's tools by argument, so a frontmatter hook reads each command and blocks anything outside the scope. It reads command text, like the gate. |
 | `mezha approve` refusing inside Claude Code | Speed bump | The boundary is the store's location, not this check. |
 | Anything on native Windows | *Advisory* | No sandbox, and hooks may run in PowerShell 5.1, which can't fail closed. `compile` refuses `os_mode = "native-windows"` until phase 4; use WSL2. |
@@ -153,6 +160,7 @@ the command's own output in the tool result, not Claude's summary. Without
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
 | `mezha verify [--json] [--project-only \| --probe \| --inside]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt`, and `--inside` is for Claude to run inside the session's sandbox ([Probing the boundary](#probing-the-boundary)). |
+| `mezha dream [--role R] [--since 7d] [--base REV] [--dry-run]` | Turns recent agent runs into reviewed memory: a commit on a new branch for project memory, a confirmed diff for local and user memory. Refuses inside Claude Code. See [Dreams](#dreams). |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -165,9 +173,9 @@ the command's own output in the tool result, not Claude's summary. Without
     settings files, the body sources under `mezha/` and the generated agents,
     skills and rules, and `mezha compile/apply/init`, so an agent can't
     quietly remove a gate or rewrite what an agent is told;
-  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, edits to
-    agent memory in every scope, the `deny_reads` patterns, and reads of
-    known credential files;
+  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, reads of
+    dream digests under `~/.mezha/dreams`, edits to agent memory in every
+    scope, the `deny_reads` patterns, and reads of known credential files;
   - `env`: git starts with no credential helper, no askpass and no terminal
     prompt (advisory);
   - `sandbox` (when `policy.sandbox = true`): enabled, no unsandboxed
@@ -222,6 +230,83 @@ memory = { scope = "project" }
 - Agent, skill, rule or command files under `.claude/` that mezha doesn't
   generate are reported by `verify`, since they skip mezha's checks.
 
+## Dreams
+
+`mezha dream` is the only way agent memory changes
+([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). Run it in
+your own terminal; it refuses inside Claude Code.
+
+```bash
+mezha dream --dry-run
+```
+
+```bash
+mezha dream --role implementer --since 3d
+```
+
+For each agent with memory (or each `--role`), it:
+
+1. **Collects the role's runs** from Claude Code's transcripts
+   (`~/.claude/projects/`, or `$CLAUDE_CONFIG_DIR/projects/`): subagent runs
+   and sessions started with `claude --agent <role>`, in this project and its
+   worktrees, that ended after the role's last dream on this machine (or
+   `--since`; 7 days the first time). Each run becomes a digest: the task,
+   failed tool calls, the final message and its `## Lessons`, and your next
+   message. Secrets and hidden or control characters are redacted; when the
+   spec has PHI anywhere, email addresses, phone numbers, record numbers and
+   dates of birth are too.
+2. **Runs a dreamer**: `claude -p --restricted` with Read, Grep, Glob, Edit
+   and Write only, no CLAUDE.md, no auto memory, no MCP servers, no settings
+   files but managed ones, and one allow rule: a staged copy of the role's
+   memory. It reads the project in a worktree of `origin/HEAD` (or `--base`)
+   and its digests on stdin. mezha stops it if Claude Code reports other
+   tools, MCP servers or another permission mode.
+3. **Reviews the staged copy itself**: flat `*.md` files only, no
+   `CHANGELOG.md`, no symlinks, the worktree untouched, and nothing hard in
+   the added lines: hidden or control characters, secrets, remote images or
+   HTML, chat-template tokens, and PHI when the spec has PHI. Any of these
+   refuses the dream: nothing is committed or applied, and the workspace
+   stays for you to read. Instruction-like phrases ("ignore previous
+   instructions", `--no-verify`) are shown for you to judge, since real
+   lessons quote them too.
+4. **Delivers**:
+   - project memory: a commit per role on a new branch `mezha/dream-<time>`,
+     holding exactly the bytes mezha reviewed plus a `CHANGELOG.md` entry.
+     mezha prints the `git log`, `git push` and `gh pr create` commands and
+     pushes nothing;
+   - local and user memory: the diff, applied when you type `y`. Without a
+     terminal, mezha leaves a patch and applies nothing.
+
+A dream's workspace is `~/.mezha/dreams/<repo>/<time>/`: the digests
+(`inbox/`), the staged memory, the PR body, patches, and the worktree while
+a dream runs or after a refusal. Sandboxed commands can't write there and
+sessions may not read it. The five newest finished dreams are kept. The
+repository's git hooks don't run during a dream.
+
+Settings, in `[memory]`: `dream_model` (default `sonnet`),
+`dream_budget_usd` per role (default 1.0) and `dream_max_turns` (default
+40). Claude Code checks the budget between turns, so a dream can spend a
+turn's worth past it. `dream_policy` in an agent's `memory` picks what the dreamer keeps:
+`lessons` (the default: "avoid X because Y, seen N times"),
+`verified-facts` (only facts it checked, with `file:line`) or
+`attack-patterns-only` (patterns that found real bugs).
+
+Agents load memory as instructions, so give it owners: add
+`/.claude/agent-memory/ @your-team` to CODEOWNERS and require code owner
+reviews on the default branch. `verify`'s `dreamer` check warns until
+CODEOWNERS covers it, and fails on hidden characters, secrets or remote
+images in memory.
+
+The dreamer uses your Claude Code login. `--restricted` ignores your user
+settings, so mezha carries over provider settings from their `env`
+(`ANTHROPIC_*`, Bedrock, Vertex, proxies, CA certificates) and the
+`apiKeyHelper`-style helpers, and lists what it carried. Unattended runs
+(step 2c) will use `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+Installed Claude Code mods and plugins still load, and mezha lists them.
+
+The scans are patterns: they reduce PHI and injection risk, they don't
+remove it. Read every dream diff. For PHI, local scope is the boundary.
+
 ## The spec
 
 `mezha.toml` follows section 4 of the plan. Unknown keys are errors. The
@@ -271,11 +356,50 @@ The scheduled workflow `.github/workflows/srt.yml` runs them weekly on
 Ubuntu 24.04 and macOS 15, with srt installed from the lockfile in
 `ci/srt`. It needs the repository on GitHub to run.
 
+`crates/mezha-cli/tests/dream.rs` runs `mezha dream` end to end with a
+stand-in `claude` that checks its arguments and plays a dreamer, against
+fixture transcripts in a scratch home. `crates/mezha-memory/tests/memory.rs`
+compares digests with `tests/fixtures/inbox-implementer` (rewrite them with
+`MEZHA_BLESS=1`), and `scan_table.rs` lists what the scans must and must not
+find.
+
+`crates/mezha-cli/tests/real_dream.rs` runs one real dream against haiku
+(about $0.02) with your Claude Code login, and removes what it puts in your
+home afterwards:
+
+```bash
+MEZHA_REAL_DREAM=1 cargo test -p mezha --test real_dream -- --ignored --nocapture
+```
+
+What the dreamer's invocation was checked against (Claude Code 2.1.285,
+haiku, step 2b spike):
+
+- `system/init` lists exactly Edit, Glob, Grep, Read and Write, no MCP
+  servers, and `dontAsk`.
+- Write and Edit work in the `--add-dir` staged directory under
+  `~/.mezha/dreams` with `Edit(//<dir>/*.md)`. A `.txt` file there, a file
+  in the worktree, and reads outside the working directories are refused.
+- A PreToolUse hook from `--settings` fires under `--restricted`, before the
+  permission check, and exit 2 blocks. The real `dream-guard` refused
+  `CHANGELOG.md` and a `..` path.
+- CLAUDE.md in the project and its parent, `.claude/rules` and auto memory
+  reach a plain `claude -p`. Each of `--restricted` and
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` keeps all of them out on its own;
+  `--system-prompt` doesn't. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` keeps auto
+  memory out.
+- `~/.claude/file-history` gains nothing.
+- A tiny budget ends in `error_max_budget_usd` (`budget_exhausted`), and
+  `--max-turns` in `error_max_turns`. A failed login ends in `success`
+  with `is_error: true`, which is why mezha checks both.
+- An `apiKeyHelper` in `--settings` runs under `--restricted` and takes
+  precedence over the claude.ai login.
+- A session started with `--agent X` records
+  `{"type":"agent-setting","agentSetting":"X"}`, which the inbox reads.
+
 The workspace has eight crates: `mezha-spec`, `mezha-render`, `mezha-hooks`,
-`mezha-broker`, `mezha-verify` and `mezha` (the CLI) do the work;
-`mezha-memory` and `mezha-metrics` are placeholders for later phases. The
-boundary scenarios verify must fail on live in
-`crates/mezha-verify/tests/boundary.rs`.
+`mezha-broker`, `mezha-verify`, `mezha-memory` and `mezha` (the CLI) do the
+work; `mezha-metrics` is a placeholder for step 2c. The boundary scenarios
+verify must fail on live in `crates/mezha-verify/tests/boundary.rs`.
 
 ## Documents
 

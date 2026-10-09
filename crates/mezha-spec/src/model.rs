@@ -86,6 +86,30 @@ pub struct Memory {
     pub default_scope: Scope,
     /// Repositories that hold PHI: their agent memory is local only.
     pub phi_repos: Vec<String>,
+    /// The model `mezha dream` runs the dreamer on.
+    pub dream_model: Option<String>,
+    /// The most one role's dream may cost, in US dollars.
+    pub dream_budget_usd: Option<f64>,
+    /// The most turns one role's dream may take.
+    pub dream_max_turns: Option<u32>,
+}
+
+pub const DEFAULT_DREAM_MODEL: &str = "sonnet";
+pub const DEFAULT_DREAM_BUDGET_USD: f64 = 1.0;
+pub const DEFAULT_DREAM_MAX_TURNS: u32 = 40;
+
+impl Memory {
+    pub fn dream_model(&self) -> &str {
+        self.dream_model.as_deref().unwrap_or(DEFAULT_DREAM_MODEL)
+    }
+
+    pub fn dream_budget_usd(&self) -> f64 {
+        self.dream_budget_usd.unwrap_or(DEFAULT_DREAM_BUDGET_USD)
+    }
+
+    pub fn dream_max_turns(&self) -> u32 {
+        self.dream_max_turns.unwrap_or(DEFAULT_DREAM_MAX_TURNS)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -220,8 +244,31 @@ pub struct AgentMemory {
     /// Absent means `[memory] default_scope` (or `local` for PHI).
     pub scope: Option<Scope>,
     pub class: Option<MemoryClass>,
-    /// How the dreamer filters this role's memory. Checked in phase 2.
-    pub dream_policy: Option<String>,
+    /// What the dreamer keeps in this role's memory; absent means `lessons`.
+    pub dream_policy: Option<DreamPolicy>,
+}
+
+/// What the dreamer keeps in a role's memory (`mezha-plan.md` section 3.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DreamPolicy {
+    /// "Avoid X because Y (seen N times)": lessons from what went wrong.
+    #[default]
+    Lessons,
+    /// Only facts checked against the code, with `file:line`.
+    VerifiedFacts,
+    /// Only attack patterns that found real bugs; never "this can be skipped".
+    AttackPatternsOnly,
+}
+
+impl DreamPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DreamPolicy::Lessons => "lessons",
+            DreamPolicy::VerifiedFacts => "verified-facts",
+            DreamPolicy::AttackPatternsOnly => "attack-patterns-only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -321,6 +368,16 @@ impl Spec {
             return Some(Scope::Local);
         }
         Some(memory.scope.unwrap_or(self.memory.default_scope))
+    }
+
+    /// True when any memory in this spec holds PHI.
+    pub fn has_phi(&self) -> bool {
+        self.is_phi_repo()
+            || self.agent.values().any(|a| {
+                a.memory
+                    .as_ref()
+                    .is_some_and(|m| m.class == Some(MemoryClass::Phi))
+            })
     }
 
     /// The gated command prefixes from `[policy] permissions_ask`.

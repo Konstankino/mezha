@@ -1,3 +1,4 @@
+pub mod dreamer;
 pub mod hygiene;
 pub mod layers;
 pub mod plugin;

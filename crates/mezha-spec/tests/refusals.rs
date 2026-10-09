@@ -366,3 +366,66 @@ fn agent_tools() {
     ));
     only_error(&d, "agent.a.max_turns");
 }
+
+#[test]
+fn dream_settings() {
+    let spec = parse(&format!(
+        "{BASE}\n[memory]\ndream_model = \"opus\"\ndream_budget_usd = 2\ndream_max_turns = 10\n"
+    ))
+    .unwrap();
+    assert!(validate(&spec).0.is_empty());
+    assert_eq!(spec.memory.dream_model(), "opus");
+    assert_eq!(spec.memory.dream_budget_usd(), 2.0);
+    assert_eq!(spec.memory.dream_max_turns(), 10);
+    let defaults = parse(BASE).unwrap();
+    assert_eq!(defaults.memory.dream_model(), "sonnet");
+    assert_eq!(defaults.memory.dream_budget_usd(), 1.0);
+    assert_eq!(defaults.memory.dream_max_turns(), 40);
+
+    for (line, path) in [
+        (
+            "dream_model = \"--dangerously-skip-permissions\"",
+            "memory.dream_model",
+        ),
+        ("dream_model = \"son net\"", "memory.dream_model"),
+        ("dream_model = \"\"", "memory.dream_model"),
+        ("dream_budget_usd = 0", "memory.dream_budget_usd"),
+        ("dream_budget_usd = 51", "memory.dream_budget_usd"),
+        ("dream_budget_usd = nan", "memory.dream_budget_usd"),
+        ("dream_max_turns = 0", "memory.dream_max_turns"),
+        ("dream_max_turns = 201", "memory.dream_max_turns"),
+    ] {
+        let d = check(&format!("{BASE}\n[memory]\n{line}\n"));
+        only_error(&d, path);
+    }
+}
+
+#[test]
+fn dream_policies() {
+    let spec = load("plan-example.toml");
+    assert_eq!(
+        spec.agent["adversary"]
+            .memory
+            .as_ref()
+            .unwrap()
+            .dream_policy,
+        Some(mezha_spec::DreamPolicy::AttackPatternsOnly)
+    );
+    let text = format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nmemory = {{ dream_policy = \"forget-everything\" }}\n"
+    );
+    let e = parse(&text).unwrap_err().to_string();
+    for policy in ["lessons", "verified-facts", "attack-patterns-only"] {
+        assert!(e.contains(policy), "{e}");
+    }
+}
+
+#[test]
+fn has_phi() {
+    assert!(!parse(BASE).unwrap().has_phi());
+    let spec = parse(&format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nmemory = {{ class = \"phi\" }}\n"
+    ))
+    .unwrap();
+    assert!(spec.has_phi());
+}

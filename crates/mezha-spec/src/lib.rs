@@ -13,7 +13,8 @@ mod validate;
 
 pub use bash_pattern::BashPattern;
 pub use model::{
-    Agent, AgentMemory, BODY_DIR, Capability, DreamSchedule, Effort, HumanGate, Languages, Memory,
+    Agent, AgentMemory, BODY_DIR, Capability, DEFAULT_DREAM_BUDGET_USD, DEFAULT_DREAM_MAX_TURNS,
+    DEFAULT_DREAM_MODEL, DreamPolicy, DreamSchedule, Effort, HumanGate, Languages, Memory,
     MemoryClass, OsMode, Policy, Preset, Project, Rule, Scope, Skill, Spec,
 };
 pub use names::check_name;

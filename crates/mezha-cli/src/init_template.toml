@@ -23,6 +23,9 @@ deny_reads = [".env", "*.pem", "*.key"]
 # dream_schedule = "manual"    # nightly | manual | cron
 # default_scope = "project"    # project | local | user
 # phi_repos = []               # repos whose agent memory must stay local
+# dream_model = "sonnet"       # the model `mezha dream` runs the dreamer on
+# dream_budget_usd = 1.0       # the most one role's dream may cost
+# dream_max_turns = 40
 
 # Agents, skills and rules: mezha writes the frontmatter into .claude/, and
 # the body comes from a Markdown file you own under mezha/ (by default
@@ -34,6 +37,7 @@ deny_reads = [".env", "*.pem", "*.key"]
 # tools = ["Read", "Edit", "Write", "Bash(cargo test *)"]  # Bash scopes: advisory
 # rule_of_two = ["untrusted_input", "private_data"]  # at most two of three
 # memory = { scope = "project" }  # read-only in sessions; `mezha dream` updates it
+#                                 # dream_policy = "lessons" | "verified-facts" | "attack-patterns-only"
 # max_turns = 60
 #
 # [skill.rust-conventions]

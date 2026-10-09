@@ -29,6 +29,11 @@ pub const MEMORY_DENY: [&str; 3] = [
     "Edit(~/.claude/agent-memory/**)",
 ];
 
+/// Dream digests may hold PHI and other people's words: sessions may not
+/// read them, with the Read tool or (merged into the sandbox's read
+/// restrictions) from a sandboxed command. `mezha dream` writes them there.
+pub const DREAMS_READ_DENY: &str = "Read(~/.mezha/dreams/**)";
+
 /// mezha commands that rewrite the generated files ask first too.
 const ASK_COMMANDS: [&str; 3] = [
     "Bash(mezha compile *)",
@@ -188,6 +193,7 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
     let mut deny = vec![
         "Bash(mezha approve *)".to_string(),
         "Edit(~/.mezha/**)".to_string(),
+        DREAMS_READ_DENY.to_string(),
     ];
     deny.extend(MEMORY_DENY.iter().map(|s| s.to_string()));
     deny.extend(spec.policy.deny_reads.iter().map(|p| format!("Read({p})")));

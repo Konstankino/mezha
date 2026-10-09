@@ -11,12 +11,19 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use mezha_broker::approvals;
 
+/// True when Claude Code started this process. Only variables Claude Code
+/// sets for its own processes count: people export others, such as
+/// `CLAUDE_CODE_USE_BEDROCK`, in their shell profile.
+pub fn inside_claude_code(var: &impl Fn(&str) -> Option<String>) -> bool {
+    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
+    set("CLAUDECODE") || set("CLAUDE_CODE_ENTRYPOINT")
+}
+
 /// Why `approve` won't grant or revoke here, if it won't. Only variables
 /// Claude Code sets for its own processes count: people export others, such
 /// as `CLAUDE_CODE_USE_BEDROCK`, in their shell profile.
 pub fn refusal(var: impl Fn(&str) -> Option<String>, stdin_is_tty: bool) -> Option<&'static str> {
-    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
-    if set("CLAUDECODE") || set("CLAUDE_CODE_ENTRYPOINT") {
+    if inside_claude_code(&var) {
         return Some(
             "mezha approve refuses to run inside Claude Code: an approval has to come from a \
              human in their own terminal",
