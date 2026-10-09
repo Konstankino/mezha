@@ -36,6 +36,9 @@ name = "base"
 permissions_ask = ["git push"]
 "#;
 
+/// What every test agent needs besides the property under test.
+const AGENT: &str = "description = \"A test agent.\"\ntools = [\"Read\"]\n";
+
 #[test]
 fn plan_example_builds_with_one_warning() {
     let spec = load("plan-example.toml");
@@ -91,7 +94,7 @@ fn refuses_phi_memory_in_project_scope() {
 #[test]
 fn phi_memory_without_a_scope_becomes_local() {
     let spec = parse(&format!(
-        "{BASE}\n[agent.a]\nrule_of_two = []\nmemory = {{ class = \"phi\" }}\n"
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nmemory = {{ class = \"phi\" }}\n"
     ))
     .unwrap();
     let d = validate(&spec);
@@ -113,10 +116,14 @@ permissions_ask = ["git push"]
 phi_repos = ["client-x-phi"]
 
 [agent.a]
+description = "A test agent."
+tools = ["Read"]
 rule_of_two = []
 memory = { scope = "user" }
 
 [agent.b]
+description = "A test agent."
+tools = ["Read"]
 rule_of_two = []
 memory = {}
 "#;
@@ -129,14 +136,14 @@ memory = {}
 
 #[test]
 fn rule_of_two_is_required() {
-    let d = check(&format!("{BASE}\n[agent.a]\ntools = [\"Read\"]\n"));
+    let d = check(&format!("{BASE}\n[agent.a]\n{AGENT}"));
     only_error(&d, "agent.a.rule_of_two");
 }
 
 #[test]
 fn rule_of_two_rejects_duplicates_and_needless_gates() {
     let d = check(&format!(
-        "{BASE}\n[agent.a]\nrule_of_two = [\"private_data\", \"private_data\"]\nhuman_gate = \"advisory\"\n"
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = [\"private_data\", \"private_data\"]\nhuman_gate = \"advisory\"\n"
     ));
     only_error(&d, "agent.a.rule_of_two");
     assert_eq!(paths(&d, Severity::Warning), ["agent.a.human_gate"]);
@@ -145,7 +152,7 @@ fn rule_of_two_rejects_duplicates_and_needless_gates() {
 #[test]
 fn a_tool_cannot_be_allowed_and_disallowed() {
     let d = check(&format!(
-        "{BASE}\n[agent.a]\nrule_of_two = []\ntools = [\"Read\", \"Edit\"]\ndisallowed_tools = [\"Edit\"]\n"
+        "{BASE}\n[agent.a]\ndescription = \"A test agent.\"\nrule_of_two = []\ntools = [\"Read\", \"Bash(cargo test *)\"]\ndisallowed_tools = [\"Bash\"]\n"
     ));
     only_error(&d, "agent.a.tools");
 }
@@ -212,7 +219,9 @@ fn rules_without_paths_warn() {
 
 #[test]
 fn names_must_be_file_and_mention_safe() {
-    let d = check(&format!("{BASE}\n[agent.Implementer]\nrule_of_two = []\n"));
+    let d = check(&format!(
+        "{BASE}\n[agent.Implementer]\n{AGENT}rule_of_two = []\n"
+    ));
     only_error(&d, "agent.Implementer");
     let d = check(&format!("{BASE}\n[rule.\"con\"]\npaths = [\"x\"]\n"));
     only_error(&d, "rule.con");
@@ -265,4 +274,95 @@ fn unknown_keys_and_newer_schemas_fail_to_load() {
     let d =
         check("schema = 0\n[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push\"]\n");
     only_error(&d, "schema");
+}
+
+#[test]
+fn agents_need_a_description_and_a_safe_body_path() {
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ntools = [\"Read\"]\nrule_of_two = []\n"
+    ));
+    let e = only_error(&d, "agent.a.description");
+    assert!(e.message.contains("is missing"));
+    for bad in [
+        "../x.md",
+        "/abs.md",
+        "agents/a.md",
+        "mezha/.claude/a.md",
+        "mezha/.GIT/a.md",
+        "mezha/a.txt",
+        "mezha\\\\a.md",
+        "mezha//a.md",
+        "mezha/./a.md",
+    ] {
+        let d = check(&format!(
+            "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nprompt_file = \"{bad}\"\n"
+        ));
+        only_error(&d, "agent.a.prompt_file");
+    }
+    let ok = check(&format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nprompt_file = \"mezha/roles/a.md\"\n"
+    ));
+    assert!(!ok.has_errors(), "{:#?}", ok.0);
+    let d = check(&format!(
+        "{BASE}\n[skill.k]\npreset = \"command\"\ndescription = \"Do it.\"\nbody_file = \"docs/k.md\"\n[rule.r]\npaths = [\"x\"]\nbody_file = \"mezha/rules/r.txt\"\n"
+    ));
+    assert_eq!(
+        paths(&d, Severity::Error),
+        ["skill.k.body_file", "rule.r.body_file"]
+    );
+}
+
+#[test]
+fn frontmatter_strings_must_not_end_the_block() {
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"a --- b\"\ntools = [\"Read\"]\nrule_of_two = []\n"
+    ));
+    let e = only_error(&d, "agent.a.description");
+    assert!(e.message.contains("---"));
+    let d = check(&format!(
+        "{BASE}\n[skill.k]\npreset = \"command\"\ndescription = \"Do it.\\u2028\"\npaths = [\"a---b\"]\n"
+    ));
+    assert_eq!(
+        paths(&d, Severity::Error),
+        ["skill.k.description", "skill.k.paths"]
+    );
+}
+
+#[test]
+fn agent_tools() {
+    // No tools key: everything is inherited, which deserves a warning.
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\nrule_of_two = []\n"
+    ));
+    assert!(!d.has_errors());
+    assert_eq!(paths(&d, Severity::Warning), ["agent.a.tools"]);
+    // tools = [] is fine: no tools at all.
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = []\nrule_of_two = []\n"
+    ));
+    assert!(d.0.is_empty(), "{:#?}", d.0);
+    // Only Bash and Agent take a specifier.
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = [\"Read(src/**)\", \"Agent(explorer)\", \"Bash(cargo test *)\"]\nrule_of_two = []\n"
+    ));
+    let e = only_error(&d, "agent.a.tools");
+    assert!(e.message.contains("Read(src/**)"), "{e}");
+    // Unscoped Bash warns, unknown tools warn, disallowed takes bare names.
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = [\"Bash\", \"Telepathy\"]\ndisallowed_tools = [\"Edit(x)\"]\nrule_of_two = []\n"
+    ));
+    assert_eq!(paths(&d, Severity::Error), ["agent.a.disallowed_tools"]);
+    assert_eq!(
+        paths(&d, Severity::Warning),
+        ["agent.a.tools", "agent.a.tools"]
+    );
+    // A scoped Bash can't be checked for PowerShell.
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = [\"Bash(cargo *)\", \"PowerShell\"]\nrule_of_two = []\n"
+    ));
+    only_error(&d, "agent.a.tools");
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nmax_turns = 0\n"
+    ));
+    only_error(&d, "agent.a.max_turns");
 }

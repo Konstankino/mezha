@@ -1,0 +1,52 @@
+# The full golden project: agents (one PHI, one with scoped Bash), both
+# skill presets, rules with and without paths, and strings that would
+# break hand-quoted YAML.
+[project]
+name = "golden-full"
+
+[policy]
+egress_allow = ["crates.io"]
+permissions_ask = ["git push"]
+
+[agent.implementer]
+description = "Implements changes in this workspace. Use for coding tasks: \"edit\", # not a comment, *glob*, & ampersand, ü, 'single', key: value."
+model = "sonnet"
+effort = "high"
+tools = ["Read", "Edit", "Write", "Grep", "Bash(cargo test *)", "Bash(cargo build *)", "Agent(explorer)"]
+skills = ["rust-conventions"]
+rule_of_two = ["untrusted_input", "private_data"]
+memory = { scope = "project" }
+max_turns = 60
+
+[agent.explorer]
+description = "Answers questions about the codebase with file:line evidence. Use before changing unfamiliar code."
+model = "haiku"
+tools = ["Read", "Grep", "Glob"]
+rule_of_two = ["private_data"]
+memory = {}
+
+[agent.clinician]
+description = "Works on the clinical data module."
+tools = ["Read", "Grep"]
+disallowed_tools = ["WebFetch"]
+rule_of_two = ["private_data"]
+memory = { class = "phi" }
+prompt_file = "mezha/roles/clinician.md"
+
+[skill.rust-conventions]
+preset = "knowledge"
+description = "Error handling and test conventions for this Rust workspace. Use when writing or reviewing Rust code."
+paths = ["**/*.rs", "Cargo.toml"]
+
+[skill.release]
+preset = "command"
+description = "Cut a release: checks, version bump, tag."
+when_to_use = "When the user asks to release or tag a version."
+arguments = ["version"]
+allowed_tools = ["Bash(cargo test *)", "Bash(git tag *)"]
+
+[rule.terraform]
+paths = ["infra/**/*.tf"]
+max_lines = 3
+
+[rule.always]

@@ -28,10 +28,21 @@ pub struct Heredoc {
     pub body: String,
 }
 
+/// A redirection and its target word.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Redirect {
+    pub target: Word,
+    /// `>`, `>>`, `>|`, `<>`, `&>`: something may be written.
+    pub writes: bool,
+    /// `>&` or `<&`: the target is a file descriptor, not a file.
+    pub dup: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Command {
     pub words: Vec<Word>,
     pub heredocs: Vec<Heredoc>,
+    pub redirects: Vec<Redirect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +80,7 @@ enum Next {
     #[default]
     Word,
     /// The next word is a redirection target, not an argument.
-    Drop,
+    Target { writes: bool, dup: bool },
     /// The next word is a here-string's text.
     HereString,
 }
@@ -79,6 +90,7 @@ struct Building {
     word: Option<Word>,
     words: Vec<Word>,
     heredocs: Vec<Heredoc>,
+    redirects: Vec<Redirect>,
     /// Heredocs of this command: (delimiter, strip_tabs, index in heredocs).
     pending: Vec<(String, bool, usize)>,
     next: Next,
@@ -93,7 +105,11 @@ impl Building {
         if let Some(word) = self.word.take() {
             match std::mem::take(&mut self.next) {
                 Next::Word => self.words.push(word),
-                Next::Drop => {}
+                Next::Target { writes, dup } => self.redirects.push(Redirect {
+                    target: word,
+                    writes,
+                    dup,
+                }),
                 Next::HereString => self.heredocs.push(Heredoc {
                     quoted: true,
                     body: word.text,
@@ -187,7 +203,7 @@ impl Parser {
     fn end_command(&mut self, cmd: &mut Building) {
         cmd.end_word();
         let built = std::mem::take(cmd);
-        if built.words.is_empty() && built.heredocs.is_empty() {
+        if built.words.is_empty() && built.heredocs.is_empty() && built.redirects.is_empty() {
             return;
         }
         let index = self.out.len();
@@ -202,6 +218,7 @@ impl Parser {
         self.out.push(Command {
             words: built.words,
             heredocs: built.heredocs,
+            redirects: built.redirects,
         });
     }
 
@@ -276,10 +293,14 @@ impl Parser {
             self.pos += 1;
             return self.list(Some(')'), depth + 1);
         }
-        if matches!(self.peek(), Some('>' | '&' | '|')) {
+        let second = self.peek().filter(|c| matches!(c, '>' | '&' | '|'));
+        if second.is_some() {
             self.pos += 1;
         }
-        cmd.next = Next::Drop;
+        cmd.next = Next::Target {
+            writes: op == Some('>') || second == Some('>'),
+            dup: second == Some('&'),
+        };
         Ok(())
     }
 
@@ -507,6 +528,38 @@ mod tests {
             [vec!["make"]]
         );
         assert_eq!(words("echo hi > push"), [vec!["echo", "hi"]]);
+    }
+
+    #[test]
+    fn keeps_redirections_apart() {
+        let cmds = parse(
+            "make 2>&1 >build.log < in.txt &>/dev/null >>log <>rw <&3",
+            0,
+        )
+        .unwrap();
+        let seen: Vec<(String, bool, bool)> = cmds[0]
+            .redirects
+            .iter()
+            .map(|r| (r.target.text.clone(), r.writes, r.dup))
+            .collect();
+        let expect = |t: &str, w, d| (t.to_string(), w, d);
+        assert_eq!(
+            seen,
+            [
+                expect("1", true, true),
+                expect("build.log", true, false),
+                expect("in.txt", false, false),
+                expect("/dev/null", true, false),
+                expect("log", true, false),
+                expect("rw", true, false),
+                expect("3", false, true),
+            ]
+        );
+        // A redirection alone is still a command (`> file` truncates it).
+        let alone = parse("> victim.txt", 0).unwrap();
+        assert_eq!(alone.len(), 1);
+        assert!(alone[0].words.is_empty());
+        assert_eq!(alone[0].redirects[0].target.text, "victim.txt");
     }
 
     #[test]

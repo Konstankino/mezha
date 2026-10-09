@@ -24,12 +24,16 @@ deny_reads = [".env", "*.pem", "*.key"]
 # default_scope = "project"    # project | local | user
 # phi_repos = []               # repos whose agent memory must stay local
 
-# Agents, skills and rules are validated now and rendered in a later release.
+# Agents, skills and rules: mezha writes the frontmatter into .claude/, and
+# the body comes from a Markdown file you own under mezha/ (by default
+# mezha/agents/<name>.md, mezha/skills/<name>.md, mezha/rules/<name>.md).
 #
 # [agent.implementer]
+# description = "Implements changes in this workspace. Use for coding tasks."
 # model = "sonnet"
-# tools = ["Read", "Edit", "Write", "Bash(cargo *)"]
+# tools = ["Read", "Edit", "Write", "Bash(cargo test *)"]  # Bash scopes: advisory
 # rule_of_two = ["untrusted_input", "private_data"]  # at most two of three
+# memory = { scope = "project" }  # read-only in sessions; `mezha dream` updates it
 # max_turns = 60
 #
 # [skill.rust-conventions]

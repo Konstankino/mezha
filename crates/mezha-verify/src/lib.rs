@@ -74,7 +74,8 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
             errors.join("\n")
         )));
     }
-    let rendered = mezha_render::render(&spec, &text).map_err(|e| CantRun::Spec(e.to_string()))?;
+    let rendered =
+        mezha_render::render(&spec, &text, &ctx.root).map_err(|e| CantRun::Spec(e.to_string()))?;
     if opts.inside {
         return verify_inside(ctx, opts);
     }
@@ -125,20 +126,15 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         push,
         checks::settings::check(ctx, &rendered, opts),
         checks::layers::check(ctx, &layers, opts),
-        checks::hygiene::check(ctx),
+        checks::hygiene::check(ctx, &spec, &rendered),
         protection,
         Check::skip(
             "dreamer",
             "the dreamer can't run commands",
             Kind::Integrity,
-            "arrives in phase 2",
+            "arrives in step 2b",
         ),
-        Check::skip(
-            "plugin-validate",
-            "claude plugin validate",
-            Kind::Integrity,
-            "no skills or agents are rendered yet",
-        ),
+        checks::plugin::check(ctx, opts),
     ];
     let mut notes = Vec::new();
     if ctx.var("CLAUDECODE").is_some() {

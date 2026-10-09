@@ -19,3 +19,4 @@ similar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+yaml-rust2.workspace = true

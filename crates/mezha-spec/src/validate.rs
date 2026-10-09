@@ -2,14 +2,18 @@
 //! pass reports everything; any error means nothing gets written.
 
 use std::collections::BTreeSet;
+use std::path::{Component, Path};
 
-use crate::model::{Capability, Preset, Scope, Spec};
+use crate::model::{BODY_DIR, Capability, Preset, Scope, Spec};
+use crate::tools::{KNOWN_TOOLS, frontmatter_problem, parse_tool};
 use crate::{CommandPrefix, SCHEMA_VERSION, check_name};
 
 /// `description` + `when_to_use` beyond this are cut from Claude's skill listing.
 pub const SKILL_LISTING_MAX: usize = 1536;
 /// Knowledge skills need a description Claude can match against.
 pub const KNOWLEDGE_DESCRIPTION_MIN: usize = 40;
+/// Every agent's description is in Claude's listing on every turn.
+pub const AGENT_DESCRIPTION_LONG: usize = 1024;
 
 /// Programs whose `Bash(...)` scope still allows any command.
 const INTERPRETERS: [&str; 9] = [
@@ -220,19 +224,38 @@ fn agents(spec: &Spec, d: &mut Diagnostics) {
             }
         }
 
-        let disallowed: BTreeSet<&str> =
-            agent.disallowed_tools.iter().map(String::as_str).collect();
-        for tool in &agent.tools {
-            if disallowed.contains(tool.as_str()) {
-                d.error(
-                    at("tools"),
-                    format!("`{tool}` is in both tools and disallowed_tools"),
-                    None,
-                );
+        match agent.description.as_deref().map(str::trim) {
+            None => d.error(
+                at("description"),
+                "is missing: Claude decides when to use an agent from its description",
+                Some("say what the agent does and when to use it"),
+            ),
+            Some("") => d.error(at("description"), "must not be empty", None),
+            Some(text) => {
+                frontmatter_text(d, &at("description"), text);
+                if text.chars().count() > AGENT_DESCRIPTION_LONG {
+                    d.warn(
+                        at("description"),
+                        format!(
+                            "is over {AGENT_DESCRIPTION_LONG} characters, and every agent's \
+                             description is in Claude's listing on every turn"
+                        ),
+                        None,
+                    );
+                }
             }
         }
+        body_path(d, &at("prompt_file"), &agent.prompt_path(name));
+        if let Some(model) = &agent.model {
+            frontmatter_text(d, &at("model"), model);
+        }
+        if agent.max_turns == Some(0) {
+            d.error(at("max_turns"), "must be at least 1", None);
+        }
+        agent_tools(agent, &at, d);
 
         for skill in &agent.skills {
+            frontmatter_text(d, &at("skills"), skill);
             if !spec.skill.contains_key(skill) {
                 d.warn(
                     at("skills"),
@@ -301,11 +324,165 @@ pub fn is_unscoped_bash(tool: &str) -> bool {
     INTERPRETERS.contains(&program)
 }
 
+/// The agent's `tools` and `disallowed_tools`: only Bash and Agent take a
+/// specifier, since Claude Code can't scope the others per agent and
+/// dropping the specifier would widen access.
+fn agent_tools(agent: &crate::model::Agent, at: &dyn Fn(&str) -> String, d: &mut Diagnostics) {
+    let known = |name: &str| KNOWN_TOOLS.contains(&name) || name.starts_with("mcp__");
+    let Some(tools) = &agent.tools else {
+        d.warn(
+            at("tools"),
+            "is not set, so the agent inherits every tool, including MCP tools and unscoped Bash",
+            Some("list the tools it needs; tools = [] gives it none"),
+        );
+        return;
+    };
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    let mut scoped_bash = false;
+    for tool in tools {
+        frontmatter_text(d, &at("tools"), tool);
+        let Some(entry) = parse_tool(tool) else {
+            d.error(
+                at("tools"),
+                format!("`{tool}` has an unclosed parenthesis"),
+                None,
+            );
+            continue;
+        };
+        names.insert(entry.name);
+        match (entry.name, entry.specifier) {
+            ("Bash", _) if is_unscoped_bash(tool) => d.warn(
+                at("tools"),
+                format!("`{tool}` lets the agent run any command; the sandbox is the boundary"),
+                Some("scope it to what the agent needs, such as Bash(cargo test *)"),
+            ),
+            ("Bash", Some(scope)) => match crate::BashPattern::parse(scope) {
+                Ok(_) => scoped_bash = true,
+                Err(e) => d.error(
+                    at("tools"),
+                    format!("`{tool}`: the scope {e}"),
+                    Some("write the command as plain words, such as Bash(cargo test *)"),
+                ),
+            },
+            ("Agent", _) | (_, None) => {}
+            (name, Some(_)) => d.error(
+                at("tools"),
+                format!(
+                    "`{tool}`: Claude Code can't scope an agent's {name} tool, and rendering it \
+                     as {name} would allow all of it"
+                ),
+                Some(&format!("use {name}, or leave it out")),
+            ),
+        }
+        if !known(entry.name) {
+            d.warn(
+                at("tools"),
+                format!("`{}` is not a Claude Code tool mezha knows", entry.name),
+                None,
+            );
+        }
+    }
+    if scoped_bash && names.contains("PowerShell") {
+        d.error(
+            at("tools"),
+            "a scoped Bash entry is checked for Bash and Monitor only, so PowerShell would get around it",
+            Some("drop PowerShell, or make Bash unscoped"),
+        );
+    }
+    for tool in &agent.disallowed_tools {
+        frontmatter_text(d, &at("disallowed_tools"), tool);
+        match parse_tool(tool) {
+            Some(entry) if entry.specifier.is_none() => {
+                if names.contains(entry.name) {
+                    d.error(
+                        at("tools"),
+                        format!("`{}` is in both tools and disallowed_tools", entry.name),
+                        None,
+                    );
+                }
+                if !known(entry.name) {
+                    d.warn(
+                        at("disallowed_tools"),
+                        format!("`{}` is not a Claude Code tool mezha knows", entry.name),
+                        None,
+                    );
+                }
+            }
+            _ => d.error(
+                at("disallowed_tools"),
+                format!("`{tool}`: disallowed_tools takes bare tool names"),
+                None,
+            ),
+        }
+    }
+}
+
+/// A body file: Markdown under `mezha/`, as a plain relative path.
+pub fn body_path_problem(path: &str) -> Option<String> {
+    let plain = !path.is_empty()
+        && !path.contains('\\')
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    if !plain {
+        return Some(format!(
+            "`{path}` must be a plain relative path (no `..`, `.`, leading `/` or `\\`)"
+        ));
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts[0] != BODY_DIR || parts.len() < 2 {
+        return Some(format!("`{path}` must be under {BODY_DIR}/"));
+    }
+    if parts
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(".claude") || p.eq_ignore_ascii_case(".git"))
+    {
+        return Some(format!("`{path}` may not be inside .claude or .git"));
+    }
+    if !path.ends_with(".md") {
+        return Some(format!("`{path}` must be a Markdown file (.md)"));
+    }
+    None
+}
+
+fn body_path(d: &mut Diagnostics, at: &str, path: &str) {
+    if let Some(problem) = body_path_problem(path) {
+        d.error(
+            at,
+            problem,
+            Some("keep bodies under mezha/, where compile's ask rule and the sandbox protect them"),
+        );
+    }
+}
+
+fn frontmatter_text(d: &mut Diagnostics, at: &str, text: &str) {
+    if let Some(problem) = frontmatter_problem(text) {
+        d.error(at, problem, None);
+    }
+}
+
 fn skills(spec: &Spec, d: &mut Diagnostics) {
     for (name, skill) in &spec.skill {
         let at = |field: &str| format!("skill.{name}.{field}");
         if let Err(e) = check_name(name) {
             d.error(format!("skill.{name}"), e, None);
+        }
+        body_path(d, &at("body_file"), &skill.body_path(name));
+        frontmatter_text(d, &at("description"), &skill.description);
+        if let Some(when) = &skill.when_to_use {
+            frontmatter_text(d, &at("when_to_use"), when);
+        }
+        for (field, list) in [
+            ("paths", &skill.paths),
+            ("arguments", &skill.arguments),
+            ("allowed_tools", &skill.allowed_tools),
+        ] {
+            for item in list {
+                frontmatter_text(d, &at(field), item);
+            }
         }
 
         for tool in &skill.allowed_tools {
@@ -378,6 +555,13 @@ fn rules(spec: &Spec, d: &mut Diagnostics) {
     for (name, rule) in &spec.rule {
         if let Err(e) = check_name(name) {
             d.error(format!("rule.{name}"), e, None);
+        }
+        body_path(d, &format!("rule.{name}.body_file"), &rule.body_path(name));
+        for path in &rule.paths {
+            frontmatter_text(d, &format!("rule.{name}.paths"), path);
+        }
+        if rule.max_lines == Some(0) {
+            d.error(format!("rule.{name}.max_lines"), "must be at least 1", None);
         }
         if rule.paths.is_empty() {
             d.warn(

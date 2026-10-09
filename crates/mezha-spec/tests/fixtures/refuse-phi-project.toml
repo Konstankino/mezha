@@ -6,6 +6,7 @@ name = "phi-project"
 permissions_ask = ["git push"]
 
 [agent.implementer]
+description = "Implements changes."
 tools = ["Read", "Edit"]
 rule_of_two = ["private_data"]
 memory = { scope = "project", class = "phi" }

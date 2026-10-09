@@ -28,6 +28,10 @@
       "Edit(/.claude/settings.json)",
       "Edit(/.claude/settings.local.json)",
       "Edit(/.claude/.mezha-state.json)",
+      "Edit(/mezha/**)",
+      "Edit(/.claude/agents/**)",
+      "Edit(/.claude/skills/**)",
+      "Edit(/.claude/rules/**)",
       "Bash(mezha compile *)",
       "Bash(mezha apply *)",
       "Bash(mezha init *)"
@@ -35,6 +39,9 @@
     "deny": [
       "Bash(mezha approve *)",
       "Edit(~/.mezha/**)",
+      "Edit(/.claude/agent-memory/**)",
+      "Edit(/.claude/agent-memory-local/**)",
+      "Edit(~/.claude/agent-memory/**)",
       "Read(.env)",
       "Read(*.pem)",
       "Read(secrets/**)",
@@ -295,7 +302,12 @@
       "denyWrite": [
         "~/.mezha",
         "./mezha.toml",
-        "./.claude/.mezha-state.json"
+        "./.claude/.mezha-state.json",
+        "./mezha",
+        "./.claude/rules",
+        "./.claude/agent-memory",
+        "./.claude/agent-memory-local",
+        "~/.claude/agent-memory"
       ]
     },
     "network": {

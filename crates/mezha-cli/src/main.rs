@@ -235,17 +235,20 @@ fn prepare(root: &Path) -> Result<Option<Plan>> {
     let Some((spec, text)) = load(root)? else {
         return Ok(None);
     };
-    let rendered = mezha_render::render(&spec, &text)?;
+    let rendered = mezha_render::render(&spec, &text, root)?;
+    for warning in &rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !rendered.problems.is_empty() {
+        for problem in &rendered.problems {
+            eprintln!("error: {problem}");
+        }
+        eprintln!("nothing was written.");
+        return Ok(None);
+    }
     let plan = mezha_render::plan(root, &rendered)?;
     for note in &plan.notes {
         eprintln!("note: {note}");
-    }
-    let (agents, skills, rules) = (spec.agent.len(), spec.skill.len(), spec.rule.len());
-    if agents + skills + rules > 0 {
-        eprintln!(
-            "note: {agents} agent(s), {skills} skill(s) and {rules} rule(s) are validated but not \
-             rendered yet (phase 1)."
-        );
     }
     Ok(Some(plan))
 }

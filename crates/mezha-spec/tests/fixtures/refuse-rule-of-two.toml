@@ -6,5 +6,6 @@ name = "rule-of-two"
 permissions_ask = ["git push"]
 
 [agent.researcher]
+description = "Researches issues on the web."
 tools = ["Read", "WebFetch", "Bash(git push *)"]
 rule_of_two = ["untrusted_input", "private_data", "external_action"]

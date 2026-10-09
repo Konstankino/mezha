@@ -7,6 +7,7 @@
 //! reason on stderr). It never answers "allow", so the project's
 //! permission rules still apply to everything it lets through.
 
+pub mod agent_bash;
 mod approval_gate;
 pub mod matcher;
 pub mod shell;
@@ -14,7 +15,7 @@ pub mod shell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use mezha_spec::CommandPrefix;
+use mezha_spec::{BashPattern, CommandPrefix};
 
 /// The hook protocol. The generated command passes it with `--protocol`; any
 /// other number means the settings and the binary disagree, and the call is
@@ -25,7 +26,7 @@ pub const PROTOCOL: u32 = 1;
 pub const MAX_INPUT: usize = 1 << 20;
 
 /// The hooks this binary implements.
-pub const HOOKS: [&str; 1] = [approval_gate::NAME];
+pub const HOOKS: [&str; 2] = [approval_gate::NAME, agent_bash::NAME];
 
 /// What the hook prints to stderr and exits with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +109,17 @@ pub fn command_line(gates: &[CommandPrefix]) -> String {
     line
 }
 
+/// The command an agent's frontmatter runs to keep its Bash within `scopes`.
+pub fn agent_bash_command(scopes: &[BashPattern]) -> String {
+    let mut line = format!("mezha hook {} --protocol {PROTOCOL}", agent_bash::NAME);
+    for scope in scopes {
+        // BashPattern words never contain quotes, so '...' is safe.
+        line.push_str(&format!(" --allow '{scope}'"));
+    }
+    line.push_str(" || exit 2");
+    line
+}
+
 /// Runs `mezha hook <argv...>` on the event in `input`. A panic blocks too.
 pub fn run(argv: &[String], input: &[u8], env: &Env) -> Outcome {
     catch_unwind(AssertUnwindSafe(|| dispatch(argv, input, env))).unwrap_or_else(|_| {
@@ -121,6 +133,7 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
     };
     let mut protocol = None;
     let mut gates = Vec::new();
+    let mut scopes = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match (arg.as_str(), args.next()) {
@@ -131,6 +144,12 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
             ("--gate", Some(value)) => match CommandPrefix::parse(value) {
                 Ok(gate) => gates.push(gate),
                 Err(e) => return Outcome::block(format!("mezha hook: bad --gate: {e}")),
+            },
+            ("--allow", Some(value)) => match BashPattern::parse(value) {
+                Ok(scope) => scopes.push(scope),
+                Err(e) => {
+                    return Outcome::block(format!("mezha hook: bad --allow `{value}`: {e}"));
+                }
             },
             (other, _) => {
                 return Outcome::block(format!(
@@ -152,6 +171,7 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
     }
     match name.as_str() {
         approval_gate::NAME => approval_gate::run(&gates, input, env),
+        agent_bash::NAME => agent_bash::run(&scopes, input),
         other => Outcome::block(format!("mezha hook: unknown hook `{other}`")),
     }
 }

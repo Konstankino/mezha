@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::state::{STATE_PATH, STATE_VERSION, State, fingerprint, normalize};
-use crate::{GENERATED, Rendered};
+use crate::{Rendered, is_generated};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -120,7 +120,7 @@ pub fn plan(root: &Path, rendered: &Rendered) -> Result<Plan, WriteError> {
                 // The state file is in the repository, so an agent can edit
                 // it: only paths mezha generates are taken from it.
                 state.files.retain(|path, _| {
-                    let known = GENERATED.contains(&path.as_str());
+                    let known = is_generated(path);
                     if !known {
                         notes.push(format!(
                             "ignoring `{path}` in {STATE_PATH}: mezha doesn't generate it"
@@ -220,11 +220,17 @@ pub fn write(root: &Path, plan: &Plan, mode: Mode, stamp: &str) -> Result<Report
         return Err(WriteError::Conflicts);
     }
     let mut report = Report::default();
-    let conflicts: Vec<&Change> = plan.conflicts().collect();
-    if !conflicts.is_empty() {
+    // Conflicting files are about to be overwritten, and removed ones are
+    // gone afterwards: keep a copy of both.
+    let saved: Vec<&Change> = plan
+        .changes
+        .iter()
+        .filter(|c| matches!(c.action, Action::Conflict(_) | Action::Remove))
+        .collect();
+    if !saved.is_empty() {
         let dir = backup_dir(root, stamp);
-        for change in &conflicts {
-            let target = dir.join(&change.path);
+        for change in &saved {
+            let target = dir.join(backup_path(&change.path));
             let display = target.display().to_string();
             fs::create_dir_all(target.parent().expect("backup has a parent"))
                 .map_err(io_err(&display))?;
@@ -244,7 +250,15 @@ pub fn write(root: &Path, plan: &Plan, mode: Mode, stamp: &str) -> Result<Report
                 report.written.push(change.path.clone());
             }
             Action::Remove => {
-                fs::remove_file(root.join(&change.path)).map_err(io_err(&change.path))?;
+                let path = root.join(&change.path);
+                fs::remove_file(&path).map_err(io_err(&change.path))?;
+                // A skill's directory goes too once it is empty; never a
+                // non-empty one, and never through a symlink (fenced above).
+                if change.path.starts_with(".claude/skills/")
+                    && let Some(dir) = path.parent()
+                {
+                    let _ = fs::remove_dir(dir);
+                }
                 report.removed.push(change.path.clone());
             }
             Action::Unchanged | Action::KeepRemoved(_) => {}
@@ -258,6 +272,15 @@ pub fn write(root: &Path, plan: &Plan, mode: Mode, stamp: &str) -> Result<Report
 }
 
 pub const BACKUP_DIR: &str = ".mezha-backup";
+
+/// Where a file goes inside a backup: `.claude` becomes `_claude`, so Claude
+/// Code doesn't load backed-up agents and skills as if they were live.
+fn backup_path(rel: &str) -> String {
+    match rel.strip_prefix(".claude/") {
+        Some(rest) => format!("_claude/{rest}"),
+        None => rel.to_string(),
+    }
+}
 
 /// `.mezha-backup/<stamp>`, or `<stamp>-2`, `-3`... if taken.
 fn backup_dir(root: &Path, stamp: &str) -> PathBuf {
@@ -273,7 +296,7 @@ fn backup_dir(root: &Path, stamp: &str) -> PathBuf {
 
 /// Refuses paths that aren't plain relative paths, and writing through
 /// symlinks or over anything but a regular file.
-fn fence(root: &Path, rel: &str) -> Result<(), WriteError> {
+pub(crate) fn fence(root: &Path, rel: &str) -> Result<(), WriteError> {
     let refused = |reason: &str| WriteError::Refused {
         path: rel.to_string(),
         reason: reason.to_string(),

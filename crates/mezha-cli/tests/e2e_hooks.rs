@@ -297,3 +297,49 @@ fn without_claude_project_dir_the_event_cwd_is_used() {
     event["cwd"] = json!(elsewhere);
     assert_eq!(s.fire_with(&s.command, &path, None, &event).0, 2);
 }
+
+/// The `agent-bash` hook from a generated agent file, run verbatim under
+/// bash as Claude Code runs a frontmatter hook.
+#[test]
+fn an_agent_s_bash_scope_is_enforced_by_its_hook() {
+    let p = Project::new();
+    git(&p.root, &["init", "-q"]);
+    p.write_spec(&format!(
+        "{SPEC}\n[agent.tester]\ndescription = \"Runs the tests.\"\ntools = [\"Read\", \"Bash(cargo test *)\"]\nrule_of_two = []\n"
+    ));
+    fs::create_dir_all(p.root.join("mezha/agents")).unwrap();
+    fs::write(p.root.join("mezha/agents/tester.md"), "Run the tests.\n").unwrap();
+    let out = p.mezha(&["compile"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let agent = p.read(".claude/agents/tester.md");
+    let line = agent
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("- command: "))
+        .expect("the agent has a hook");
+    let command: String = serde_json::from_str(line).unwrap();
+    assert!(
+        command.starts_with("mezha hook agent-bash --protocol 1 --allow 'cargo test *'"),
+        "{command}"
+    );
+
+    let bin_dir = Path::new(common::BIN).parent().unwrap().to_path_buf();
+    let setup = Setup {
+        p,
+        command: command.clone(),
+        bin_dir,
+    };
+    let fire = |cmd: &str, path: &str| setup.fire_with(&command, path, None, &bash_event(cmd)).0;
+    let with = setup.path(OnPath::Mezha);
+    assert_eq!(fire("cargo test --release", &with), 0);
+    assert_eq!(
+        fire("cargo test 2>&1 | grep FAIL", &with),
+        2,
+        "grep isn't in scope"
+    );
+    assert_eq!(fire("curl https://example.com", &with), 2);
+    let (code, why) = setup.fire_with(&command, &with, None, &bash_event("rm -rf target"));
+    assert_eq!(code, 2);
+    assert!(why.contains("advisory"), "{why}");
+    // Without mezha, the hook fails closed.
+    assert_eq!(fire("cargo test", &setup.path(OnPath::Missing)), 2);
+}

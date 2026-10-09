@@ -109,13 +109,29 @@ pub enum Scope {
     User,
 }
 
+impl Scope {
+    /// The value Claude Code's agent `memory` field takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Project => "project",
+            Scope::Local => "local",
+            Scope::User => "user",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Agent {
+    /// When Claude should delegate to the agent. Required for rendering.
+    pub description: Option<String>,
+    /// The Markdown body, relative to the project; absent means
+    /// `mezha/agents/<name>.md`.
+    pub prompt_file: Option<String>,
     pub model: Option<String>,
     pub effort: Option<Effort>,
-    #[serde(default)]
-    pub tools: Vec<String>,
+    /// Absent: the agent inherits every tool. `[]`: no tools at all.
+    pub tools: Option<Vec<String>>,
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
     #[serde(default)]
@@ -174,6 +190,30 @@ pub enum Effort {
     Max,
 }
 
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+}
+
+/// Where the bodies of agents, skills and rules live by default.
+pub const BODY_DIR: &str = "mezha";
+
+impl Agent {
+    /// The agent's prompt file, relative to the project.
+    pub fn prompt_path(&self, name: &str) -> String {
+        self.prompt_file
+            .clone()
+            .unwrap_or_else(|| format!("{BODY_DIR}/agents/{name}.md"))
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMemory {
@@ -204,6 +244,8 @@ pub struct Skill {
     pub arguments: Vec<String>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// The Markdown body; absent means `mezha/skills/<name>.md`.
+    pub body_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -226,6 +268,13 @@ impl Skill {
         self.user_invocable
             .unwrap_or(self.preset == Preset::Command)
     }
+
+    /// The skill's body file, relative to the project.
+    pub fn body_path(&self, name: &str) -> String {
+        self.body_file
+            .clone()
+            .unwrap_or_else(|| format!("{BODY_DIR}/skills/{name}.md"))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -234,6 +283,17 @@ pub struct Rule {
     #[serde(default)]
     pub paths: Vec<String>,
     pub max_lines: Option<u32>,
+    /// The Markdown body; absent means `mezha/rules/<name>.md`.
+    pub body_file: Option<String>,
+}
+
+impl Rule {
+    /// The rule's body file, relative to the project.
+    pub fn body_path(&self, name: &str) -> String {
+        self.body_file
+            .clone()
+            .unwrap_or_else(|| format!("{BODY_DIR}/rules/{name}.md"))
+    }
 }
 
 impl Spec {

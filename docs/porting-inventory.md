@@ -17,7 +17,7 @@ item from `mezha-plan.md` sections 5.1 and 10 to its place in mezha.
 | `verify` skeleton | `src/verify.rs` (`Layers`, `Probe`, `claude_validate`) | `mezha-verify` | 1 | Reference for settings layering, hook probes and `claude plugin validate`. New: `--json`, `git push --dry-run` auth failure from the sandbox, branch protection, dreamer checks. |
 | `/inquire` with ledger and HTML viewer | `src/notes/*`, `templates/claude/commands/inquire.md.j2` | `mezha-memory` (ledgers feed the dream inbox) | 2 | Kept only if it passes "no new command without a boundary or memory reason". |
 | `/intent`: ADR, approvers, CODEOWNERS, tone check | `src/intent.rs`, `src/render/codeowners.rs`, `templates/claude/intent/*` | `mezha-render` (CODEOWNERS on `.claude/agent-memory/`) | 2 | CODEOWNERS is needed for memory governance; ADR drafting is re-evaluated. |
-| Instructions vs answers language | `src/render.rs` (`response_language`, `response_section`) | `mezha-spec` (`project.languages`), `mezha-render` | 1 | Parsed now; rendered with agents. |
+| Instructions vs answers language | `src/render.rs` (`response_language`, `response_section`) | `mezha-spec` (`project.languages`), `mezha-render` | 3 | Parsed; not rendered into agent bodies (a subagent answers the parent model, not the user). Belongs in the CLAUDE.md roster, which isn't rendered yet. |
 | `install.sh`, `install.ps1`, Scoop manifest | repo root, `scoop/ocgen.json` | repo root | 1 | Rename `OCGEN_*` to `MEZHA_*`, drop the pre-v0.5 missing-checksum fallback, fix the substring `PATH` check in `install.ps1`. |
 | Release workflow with `SHA256SUMS` | `.github/workflows/release.yml` | same path | 1 | Same shape: build per target, publish job alone has `contents: write`. |
 | Override templates (simplified) | `src/templates.rs` | `mezha-render` | 1 | Gate templates stay non-overridable. |
@@ -41,7 +41,10 @@ archetypes and their TOML seeds.
 - **FNV-1a fingerprints.** Fine for "did someone edit this", useless as a
   tamper check. Mezha: SHA-256 over LF-normalized content.
 - **YAML frontmatter written without escaping**: a description containing
-  `": "` breaks strict parsers. Mezha (phase 1): a YAML serializer.
+  `": "` breaks strict parsers. Mezha (step 2a): block-style frontmatter
+  whose every scalar is JSON-escaped by `serde_json`, a refusal of `---`
+  (Claude Code ends the block at the first one) and of characters YAML
+  forbids raw, and a round-trip test through a YAML parser.
 - **JSON rendered from text templates**: a `"` in a display name broke
   `plugin.json`. Mezha: serde_json only.
 - **Repo root from `git rev-parse --git-common-dir`.** Wrong for submodules,
@@ -71,3 +74,11 @@ See [ADR-0003](adr/0003-push-boundary.md).
 - **The git pre-push hook: dropped.** `git push --no-verify` and
   `git -c core.hooksPath=/dev/null push` skip it, so it is one more advisory
   layer, not part of the boundary.
+
+## Still not rendered (after step 2a)
+
+Step 2a renders `.claude/settings.json`, agents, skills and rules. These
+items from `mezha-plan.md` §3.2 are still to come: `.gitattributes` (LF for
+`.claude/**`), `.worktreeinclude`, the CLAUDE.md roster and protocol, an
+output style, and the plugin output (`compile --plugin`). Plugin agents
+ignore `hooks`, so the `agent-bash` hook will need another carrier there.

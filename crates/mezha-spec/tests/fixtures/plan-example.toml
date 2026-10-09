@@ -16,6 +16,7 @@ default_scope = "project"
 phi_repos = ["client-x-phi"]  # для них scope = local, очищення обовʼязкове
 
 [agent.implementer]
+description = "Implements changes in this Rust workspace. Use for coding tasks."
 model = "sonnet"
 tools = ["Read", "Edit", "Write", "Bash(cargo *)"]
 skills = ["rust-conventions", "db-migrations"]
@@ -24,6 +25,7 @@ memory = { scope = "project", class = "no-phi" }
 max_turns = 60
 
 [agent.adversary]
+description = "Reviews changes and hunts for bugs before merge. Use after an implementation."
 model = "opus"
 effort = "high"
 tools = ["Read", "Grep", "Glob", "Bash(cargo test *)"]

@@ -4,18 +4,24 @@
 //! schemas); [`validate`] runs the compiler rules from `mezha-plan.md`
 //! section 4 and returns every error and warning at once.
 
+mod bash_pattern;
 mod model;
 mod names;
 mod prefix;
+mod tools;
 mod validate;
 
+pub use bash_pattern::BashPattern;
 pub use model::{
-    Agent, AgentMemory, Capability, DreamSchedule, Effort, HumanGate, Languages, Memory,
+    Agent, AgentMemory, BODY_DIR, Capability, DreamSchedule, Effort, HumanGate, Languages, Memory,
     MemoryClass, OsMode, Policy, Preset, Project, Rule, Scope, Skill, Spec,
 };
 pub use names::check_name;
 pub use prefix::CommandPrefix;
-pub use validate::{Diagnostic, Diagnostics, Severity, is_unscoped_bash, validate};
+pub use tools::{KNOWN_TOOLS, ToolEntry, frontmatter_problem, parse_tool};
+pub use validate::{
+    Diagnostic, Diagnostics, Severity, body_path_problem, is_unscoped_bash, validate,
+};
 
 /// The newest `schema` this mezha understands.
 pub const SCHEMA_VERSION: u32 = 1;

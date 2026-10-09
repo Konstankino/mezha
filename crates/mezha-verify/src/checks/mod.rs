@@ -1,5 +1,6 @@
 pub mod hygiene;
 pub mod layers;
+pub mod plugin;
 pub mod protection;
 pub mod push;
 pub mod sandbox;

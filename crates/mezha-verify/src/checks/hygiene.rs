@@ -1,7 +1,12 @@
-//! `git-hygiene`: the generated files are committed (so clones and worktrees
-//! get the gate) and personal files are ignored.
+//! `git-hygiene`: the generated files and their body sources are committed
+//! (so clones and worktrees get the gate and the same agents), and personal
+//! files and local agent memory are ignored.
 
 use std::time::Duration;
+
+use mezha_render::Rendered;
+use mezha_render::components::memory_dir;
+use mezha_spec::{Scope, Spec};
 
 use crate::ctx::Ctx;
 use crate::report::{Check, Findings, Kind};
@@ -14,7 +19,7 @@ const COMMITTED: [&str; 3] = [
 ];
 const IGNORED: [&str; 2] = ["CLAUDE.local.md", ".claude/settings.local.json"];
 
-pub fn check(ctx: &Ctx) -> Check {
+pub fn check(ctx: &Ctx, spec: &Spec, rendered: &Rendered) -> Check {
     let check = Check::new("git-hygiene", "committed and ignored files", Kind::Hygiene);
     let mut f = Findings::default();
     let found = ctx.which_trusted("git");
@@ -42,8 +47,29 @@ pub fn check(ctx: &Ctx) -> Check {
         )
     };
 
+    // The generated files, plus every body file that exists.
+    let mut wanted: Vec<String> = COMMITTED.iter().map(|s| s.to_string()).collect();
+    wanted.extend(
+        rendered
+            .files
+            .keys()
+            .filter(|p| !wanted.contains(p))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let bodies = spec
+        .agent
+        .iter()
+        .map(|(n, a)| a.prompt_path(n))
+        .chain(spec.skill.iter().map(|(n, s)| s.body_path(n)))
+        .chain(spec.rule.iter().map(|(n, r)| r.body_path(n)));
+    for body in bodies {
+        if ctx.root.join(&body).is_file() && !wanted.contains(&body) {
+            wanted.push(body);
+        }
+    }
     let mut args = vec!["ls-files", "-z", "--"];
-    args.extend(COMMITTED);
+    args.extend(wanted.iter().map(String::as_str));
     let Ok(listed) = git_run(&args) else {
         f.warn("git couldn't run", None);
         return f.into_check(check, "");
@@ -56,9 +82,9 @@ pub fn check(ctx: &Ctx) -> Check {
         return f.into_check(check, "");
     }
     let tracked: Vec<&str> = listed.stdout.split('\0').collect();
-    let missing: Vec<&str> = COMMITTED
+    let missing: Vec<&str> = wanted
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|p| !tracked.contains(p))
         .collect();
     if !missing.is_empty() {
@@ -76,6 +102,22 @@ pub fn check(ctx: &Ctx) -> Check {
             f.warn(
                 format!("{path} is not git-ignored, so personal settings could be committed"),
                 Some(format!("Add {path} to .gitignore.")),
+            );
+        }
+    }
+    // Local memory must never be committed; probe a file inside it, since
+    // a directory pattern only matches what is in it.
+    for (name, agent) in &spec.agent {
+        if spec.memory_scope(agent) != Some(Scope::Local) {
+            continue;
+        }
+        let probe = format!("{}MEMORY.md", memory_dir(name, Scope::Local));
+        if git_run(&["check-ignore", "-q", "--", &probe]).is_ok_and(|o| o.code == Some(1)) {
+            f.fail(
+                format!(
+                    "{probe} is not git-ignored, so agent.{name}'s local memory could be committed"
+                ),
+                "Add .claude/agent-memory-local/ to .gitignore.",
             );
         }
     }

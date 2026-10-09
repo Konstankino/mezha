@@ -138,7 +138,7 @@ fn hand_edits_stop_compile_show_in_diff_and_apply_backs_them_up() {
         .collect();
     assert_eq!(backups.len(), 1);
     assert_eq!(
-        fs::read_to_string(backups[0].path().join(".claude/settings.json")).unwrap(),
+        fs::read_to_string(backups[0].path().join("_claude/settings.json")).unwrap(),
         "{ \"hand\": true }\n"
     );
 }

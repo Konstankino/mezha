@@ -30,6 +30,8 @@ Every security feature is either a boundary or labelled advisory. Today:
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
+| Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
+| An agent's `Bash(...)` scope (`agent-bash` hook) | *Advisory* | Claude Code can't scope an agent's tools by argument, so a frontmatter hook reads each command and blocks anything outside the scope. It reads command text, like the gate. |
 | `mezha approve` refusing inside Claude Code | Speed bump | The boundary is the store's location, not this check. |
 | Anything on native Windows | *Advisory* | No sandbox, and hooks may run in PowerShell 5.1, which can't fail closed. `compile` refuses `os_mode = "native-windows"` until phase 4; use WSL2. |
 
@@ -159,26 +161,66 @@ the command's own output in the tool result, not Claude's summary. Without
 ## What `compile` writes
 
 - `.claude/settings.json`:
-  - `permissions.ask`: the gated commands, edits to `mezha.toml` and the
-    settings files, and `mezha compile/apply/init`, so an agent can't quietly
-    remove a gate;
-  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, the
-    `deny_reads` patterns, and reads of known credential files;
+  - `permissions.ask`: the gated commands, edits to `mezha.toml`, the
+    settings files, the body sources under `mezha/` and the generated agents,
+    skills and rules, and `mezha compile/apply/init`, so an agent can't
+    quietly remove a gate or rewrite what an agent is told;
+  - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, edits to
+    agent memory in every scope, the `deny_reads` patterns, and reads of
+    known credential files;
   - `env`: git starts with no credential helper, no askpass and no terminal
     prompt (advisory);
   - `sandbox` (when `policy.sandbox = true`): enabled, no unsandboxed
     retries, no silent fallback when the sandbox can't start, `egress_allow`
     as the allowed hosts, the known forge write hosts it doesn't cover
     (github.com, api/uploads/ssh.github.com, gitlab.com, bitbucket.org,
-    api.bitbucket.org) as denied hosts, writes to `~/.mezha`, `mezha.toml`
-    and the state file denied, and credential files and token variables
-    withheld;
+    api.bitbucket.org) as denied hosts, writes to `~/.mezha`, `mezha.toml`,
+    the state file, `mezha/`, `.claude/rules` and agent memory denied, and
+    credential files and token variables withheld;
   - one `PreToolUse` hook on every tool: the approval gate.
+- `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md` and
+  `.claude/rules/<name>.md`: frontmatter from the spec, body from your
+  Markdown file under `mezha/` (see [Writing agents](#writing-agents)).
 - `.claude/.mezha-state.json`: SHA-256 fingerprints of the generated files.
   It tells mezha's own output from a hand edit; it is not a tamper check.
 
-`.claude/settings.local.json` is never touched. Agents, skills and rules in
-`mezha.toml` are validated now and rendered in phase 1.
+`.claude/settings.local.json` is never touched.
+
+A trap: the sandbox may not write `mezha/`, `mezha.toml`, `.claude/rules` or
+agent memory, so a sandboxed `git switch`, `rebase` or `stash` across commits
+that change those paths stops part-way. Run such git commands in your own
+terminal.
+
+## Writing agents
+
+An agent, skill or rule has two halves: its settings in `mezha.toml`, and its
+body in a Markdown file you own. compile joins them:
+
+```toml
+[agent.explorer]
+description = "Answers questions about the code with file:line evidence. Use before changing unfamiliar code."
+model = "haiku"
+tools = ["Read", "Grep", "Glob"]
+rule_of_two = ["private_data"]
+memory = { scope = "project" }
+# prompt_file = "mezha/agents/explorer.md"   # the default
+```
+
+- The body file holds only the body: mezha writes the frontmatter, so a body
+  that starts with `---` is an error. Bodies live under `mezha/` (an ask rule
+  and the sandbox protect them) and may not be symlinks.
+- `tools` takes tool names. Only `Bash(...)` and `Agent(...)` take a scope;
+  `Bash(cargo test *)` gives the agent Bash plus the advisory `agent-bash`
+  hook. Leaving `tools` out gives the agent every tool, which compile warns
+  about; `tools = []` gives it none.
+- An agent with `memory` reads `.claude/agent-memory/<name>/MEMORY.md` (or
+  the local scope for PHI) but can't write it: mezha takes back the Write and
+  Edit tools Claude Code would add, and denies the path. Local memory must
+  be git-ignored; `verify` fails if it isn't.
+- Nothing in a frontmatter value may contain `---`: Claude Code ends the
+  frontmatter at the first one.
+- Agent, skill, rule or command files under `.claude/` that mezha doesn't
+  generate are reported by `verify`, since they skip mezha's checks.
 
 ## The spec
 
@@ -192,7 +234,10 @@ compiler refuses, among other things:
 - PHI memory (`class = "phi"`, or a repository listed in `phi_repos`) with
   project or user scope;
 - a knowledge skill whose description is under 40 characters or lacks
-  "Use when".
+  "Use when";
+- an agent without a `description`, a body path outside `mezha/`, a tool
+  scope other than on `Bash` or `Agent`, and frontmatter text containing
+  `---` or control characters.
 
 Every error and warning names its place in the spec, such as
 `agent.implementer.rule_of_two`, and most come with a hint.
@@ -241,5 +286,7 @@ boundary scenarios verify must fail on live in
   command.
 - [ADR-0003](docs/adr/0003-push-boundary.md): the push boundary and what
   `mezha verify` checks.
+- [ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md): agent
+  memory changes only through reviewed dreams.
 - [Porting inventory](docs/porting-inventory.md): what comes from ocgen, and
   what doesn't.

@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::Path;
 
-use mezha_render::{Action, GENERATED, Mode, Rendered, WriteError, plan, render, write};
+use mezha_render::{Action, Mode, Rendered, WriteError, is_generated, plan, render, write};
 
 const SETTINGS: &str = ".claude/settings.json";
 const STATE: &str = ".claude/.mezha-state.json";
@@ -16,7 +16,7 @@ fn golden_dir() -> std::path::PathBuf {
 fn rendered_from(text: &str) -> Rendered {
     let spec = mezha_spec::parse(text).unwrap();
     assert!(!mezha_spec::validate(&spec).has_errors());
-    render(&spec, text).unwrap()
+    render(&spec, text, Path::new("/nonexistent")).unwrap()
 }
 
 fn rendered() -> Rendered {
@@ -50,7 +50,7 @@ fn settings_match_the_golden_file() {
 #[test]
 fn only_generated_paths_are_rendered() {
     let r = rendered();
-    assert!(r.files.keys().all(|p| GENERATED.contains(&p.as_str())));
+    assert!(r.files.keys().all(|p| is_generated(p)));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn native_windows_is_refused_for_now() {
     let text = "[project]\nname = \"p\"\nos_mode = \"native-windows\"\n";
     let spec = mezha_spec::parse(text).unwrap();
     assert_eq!(
-        render(&spec, text).unwrap_err(),
+        render(&spec, text, Path::new("/nonexistent")).unwrap_err(),
         mezha_render::RenderError::NativeWindows
     );
 }
@@ -122,10 +122,12 @@ fn a_hand_edit_is_a_conflict_compile_refuses_and_apply_backs_up() {
     let report = write(root, &p, Mode::Apply, "20270115T080000Z").unwrap();
     let backup = report.backup.unwrap();
     assert!(backup.ends_with(".mezha-backup/20270115T080000Z"));
+    // `.claude` becomes `_claude` in backups, so Claude Code doesn't load them.
     assert_eq!(
-        fs::read_to_string(backup.join(SETTINGS)).unwrap(),
+        fs::read_to_string(backup.join("_claude/settings.json")).unwrap(),
         "{ \"hand\": true }\n"
     );
+    assert!(!backup.join(".claude").exists());
     assert_eq!(
         fs::read_to_string(root.join(".mezha-backup/.gitignore")).unwrap(),
         "*\n"

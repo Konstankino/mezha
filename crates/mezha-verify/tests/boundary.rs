@@ -163,7 +163,7 @@ exec bash -c "$4""#,
     fn compile(&self, text: &str) {
         fs::write(self.root.join("mezha.toml"), text).unwrap();
         let spec = mezha_spec::parse(text).unwrap();
-        let rendered = mezha_render::render(&spec, text).unwrap();
+        let rendered = mezha_render::render(&spec, text, &self.root).unwrap();
         let plan = mezha_render::plan(&self.root, &rendered).unwrap();
         mezha_render::write(&self.root, &plan, mezha_render::Mode::Apply, "t").unwrap();
     }
@@ -1079,4 +1079,171 @@ fn inside_credentials_are_judged_as_seen() {
 
 fn r_contains_secret(text: &str) -> bool {
     text.contains("glpat-real") || text.contains("password x")
+}
+
+const WITH_AGENTS: &str = r#"[project]
+name = "boundary"
+
+[policy]
+egress_allow = []
+permissions_ask = ["git push"]
+
+[agent.helper]
+description = "Helps with the code."
+tools = ["Read", "Grep"]
+rule_of_two = []
+memory = {}
+
+[agent.medic]
+description = "Works on the clinical module."
+tools = ["Read"]
+rule_of_two = ["private_data"]
+memory = { class = "phi" }
+"#;
+
+impl Fixture {
+    /// Compiles `WITH_AGENTS`, writing its body files first.
+    fn with_agents(&self) {
+        fs::create_dir_all(self.root.join("mezha/agents")).unwrap();
+        fs::write(self.root.join("mezha/agents/helper.md"), "Help.\n").unwrap();
+        fs::write(
+            self.root.join("mezha/agents/medic.md"),
+            "Treat data with care.\n",
+        )
+        .unwrap();
+        self.compile(WITH_AGENTS);
+    }
+}
+
+#[test]
+fn generated_agents_are_checked_like_settings() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    let r = f.verify();
+    let d = detail(&r, "settings-intact");
+    assert!(
+        !d.contains("edited by hand") && !d.contains("can't render"),
+        "{d}"
+    );
+
+    // A hand edit to a generated agent.
+    let agent = f.root.join(".claude/agents/helper.md");
+    let text = fs::read_to_string(&agent)
+        .unwrap()
+        .replace("- \"Grep\"", "- \"Bash\"");
+    fs::write(&agent, text).unwrap();
+    let r = f.verify();
+    assert_eq!(status(&r, "settings-intact"), Status::Fail);
+    assert!(detail(&r, "settings-intact").contains(".claude/agents/helper.md was edited by hand"));
+
+    // A missing body: a failure, not "couldn't run".
+    fs::remove_file(f.root.join("mezha/agents/medic.md")).unwrap();
+    let r = f.verify();
+    assert!(
+        detail(&r, "settings-intact")
+            .contains("can't render .claude/agents/medic.md: mezha/agents/medic.md doesn't exist"),
+        "{}",
+        detail(&r, "settings-intact")
+    );
+
+    // An agent mezha doesn't manage.
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    fs::write(
+        f.root.join(".claude/agents/rogue.md"),
+        "---\nname: rogue\n---\n",
+    )
+    .unwrap();
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "settings-intact"),
+        Status::Warn,
+        "{}",
+        detail(&r, "settings-intact")
+    );
+    assert!(
+        detail(&r, "settings-intact").contains("not managed by mezha: .claude/agents/rogue.md")
+    );
+}
+
+#[test]
+fn local_agent_memory_must_be_ignored() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "git-hygiene"),
+        Status::Fail,
+        "{}",
+        detail(&r, "git-hygiene")
+    );
+    let d = detail(&r, "git-hygiene");
+    assert!(
+        d.contains(".claude/agent-memory-local/medic/MEMORY.md is not git-ignored"),
+        "{d}"
+    );
+    assert!(
+        d.contains("mezha/agents/helper.md"),
+        "bodies must be committed: {d}"
+    );
+
+    fs::write(
+        f.root.join(".gitignore"),
+        ".claude/agent-memory-local/\nCLAUDE.local.md\n.claude/settings.local.json\n",
+    )
+    .unwrap();
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "git-hygiene"),
+        Status::Warn,
+        "{}",
+        detail(&r, "git-hygiene")
+    );
+}
+
+#[test]
+fn plugin_validate_reads_claude_s_report() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    let claude = |plugin: &str| {
+        f.tool(
+            "claude",
+            &format!(
+                "if [ \"$1\" = --version ]; then echo '2.1.285 (Claude Code)'; exit 0; fi\nif [ \"$1 $2\" != 'plugin validate' ] || [ \"$4\" != --json ]; then echo \"unexpected: $*\" >&2; exit 9; fi\n{plugin}"
+            ),
+        );
+    };
+    claude(r#"echo '{"success":true,"contents":[]}'"#);
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "plugin-validate"),
+        Status::Pass,
+        "{}",
+        detail(&r, "plugin-validate")
+    );
+    assert!(detail(&r, "plugin-validate").contains("rules aren't checked"));
+
+    let agent = f
+        .root
+        .join(".claude/agents/helper.md")
+        .display()
+        .to_string();
+    claude(&format!(
+        r#"echo '{{"success":true,"contents":[{{"file":"{agent}","errors":[],"warnings":[{{"message":"No description"}}]}}]}}'"#
+    ));
+    let r = f.verify();
+    assert_eq!(status(&r, "plugin-validate"), Status::Warn);
+    assert!(detail(&r, "plugin-validate").contains(".claude/agents/helper.md: No description"));
+
+    claude(&format!(
+        r#"echo '{{"success":false,"contents":[{{"file":"{agent}","errors":[{{"message":"YAML frontmatter failed to parse"}}],"warnings":[]}}]}}'; exit 1"#
+    ));
+    let r = f.verify();
+    assert_eq!(status(&r, "plugin-validate"), Status::Fail);
+    assert!(detail(&r, "plugin-validate").contains("helper.md: YAML frontmatter failed to parse"));
+
+    claude("echo 'boom' >&2; exit 2");
+    let r = f.verify();
+    assert_eq!(status(&r, "plugin-validate"), Status::Warn);
+    assert!(detail(&r, "plugin-validate").contains("couldn't finish (exit 2): boom"));
 }

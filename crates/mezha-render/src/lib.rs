@@ -1,25 +1,40 @@
 //! Spec → files under `.claude/`, plus the fingerprints that let mezha tell
-//! its own output from a hand edit.
-//!
-//! Week 1 renders `.claude/settings.json` only. Agents, skills and rules are
-//! validated by mezha-spec but rendered in phase 1.
+//! its own output from a hand edit: `settings.json`, and an agent, skill or
+//! rule file for each one in the spec, whose body comes from a Markdown file
+//! the user owns under `mezha/`.
 
+pub mod components;
+mod frontmatter;
 pub mod settings;
 pub mod state;
 mod write;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use mezha_spec::{OsMode, Spec};
+use mezha_spec::{OsMode, Spec, check_name};
 
 pub use write::{
     Action, BACKUP_DIR, Change, Mode, Plan, Report, WriteError, plan, unified_diff, utc_stamp,
     write,
 };
 
-/// Every path mezha may generate. Paths read back from the state file are
-/// checked against this list.
-pub const GENERATED: [&str; 1] = [".claude/settings.json"];
+pub const SETTINGS_PATH: &str = ".claude/settings.json";
+
+/// Whether mezha may generate `path`. Paths read back from the state file
+/// (which an agent can edit) are checked against this.
+pub fn is_generated(path: &str) -> bool {
+    let named_md = |file: &str| {
+        file.strip_suffix(".md")
+            .is_some_and(|n| check_name(n).is_ok())
+    };
+    match path.split('/').collect::<Vec<_>>()[..] {
+        [".claude", "settings.json"] => true,
+        [".claude", "agents", file] | [".claude", "rules", file] => named_md(file),
+        [".claude", "skills", name, "SKILL.md"] => check_name(name).is_ok(),
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Rendered {
@@ -27,6 +42,10 @@ pub struct Rendered {
     pub files: BTreeMap<String, String>,
     /// Fingerprint of the spec text.
     pub spec: String,
+    /// Files that couldn't be rendered, such as an agent whose body file is
+    /// missing. Nothing should be written while there are any.
+    pub problems: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,8 +73,9 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
-/// Renders a validated spec. `spec_text` is the file it came from.
-pub fn render(spec: &Spec, spec_text: &str) -> Result<Rendered, RenderError> {
+/// Renders a validated spec. `spec_text` is the file it came from; body
+/// files are read from under `root`.
+pub fn render(spec: &Spec, spec_text: &str, root: &Path) -> Result<Rendered, RenderError> {
     if spec.project.os_mode == OsMode::NativeWindows {
         return Err(RenderError::NativeWindows);
     }
@@ -63,8 +83,13 @@ pub fn render(spec: &Spec, spec_text: &str) -> Result<Rendered, RenderError> {
     let mut settings_text = serde_json::to_string_pretty(&settings::settings(spec, &gates))
         .expect("settings serialize");
     settings_text.push('\n');
+    let components = components::render(spec, root);
+    let mut files = components.files;
+    files.insert(SETTINGS_PATH.to_string(), settings_text);
     Ok(Rendered {
-        files: BTreeMap::from([(GENERATED[0].to_string(), settings_text)]),
+        files,
         spec: state::fingerprint(spec_text),
+        problems: components.problems,
+        warnings: components.warnings,
     })
 }

@@ -6,13 +6,27 @@ use serde_json::{Map, Value, json};
 
 pub const SCHEMA_URL: &str = "https://json.schemastore.org/claude-code-settings.json";
 
-/// Edits that could switch a gate off ask first. `/path` in project settings
-/// means "relative to the project root".
-const ASK_EDITS: [&str; 4] = [
+/// Edits that could switch a gate off, or change what an agent is told,
+/// ask first. `/path` in project settings means "relative to the project
+/// root". `mezha/` holds the bodies of agents, skills and rules.
+const ASK_EDITS: [&str; 8] = [
     "Edit(/mezha.toml)",
     "Edit(/.claude/settings.json)",
     "Edit(/.claude/settings.local.json)",
     "Edit(/.claude/.mezha-state.json)",
+    "Edit(/mezha/**)",
+    "Edit(/.claude/agents/**)",
+    "Edit(/.claude/skills/**)",
+    "Edit(/.claude/rules/**)",
+];
+
+/// Agent memory changes only through `mezha dream`, which a person reviews
+/// (ADR-0004): sessions may not write it in any scope. Claude Code checks
+/// deny rules before its own "memory files may be written" allowance.
+pub const MEMORY_DENY: [&str; 3] = [
+    "Edit(/.claude/agent-memory/**)",
+    "Edit(/.claude/agent-memory-local/**)",
+    "Edit(~/.claude/agent-memory/**)",
 ];
 
 /// mezha commands that rewrite the generated files ask first too.
@@ -24,8 +38,17 @@ const ASK_COMMANDS: [&str; 3] = [
 
 /// Paths sandboxed commands may not write. Sandbox paths use `~/` for home
 /// and `./` for the project root. Claude Code already protects `.claude`
-/// settings and `.git/hooks` on its own.
-const DENY_WRITE: [&str; 3] = ["~/.mezha", "./mezha.toml", "./.claude/.mezha-state.json"];
+/// settings, agents, skills and `.git/hooks` on its own, but not rules.
+pub const DENY_WRITE: [&str; 8] = [
+    "~/.mezha",
+    "./mezha.toml",
+    "./.claude/.mezha-state.json",
+    "./mezha",
+    "./.claude/rules",
+    "./.claude/agent-memory",
+    "./.claude/agent-memory-local",
+    "~/.claude/agent-memory",
+];
 
 /// Hosts a forge accepts pushes on: git over HTTPS (and SSH over port
 /// 443), and the APIs that write. Those `egress_allow` doesn't cover
@@ -166,6 +189,7 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
         "Bash(mezha approve *)".to_string(),
         "Edit(~/.mezha/**)".to_string(),
     ];
+    deny.extend(MEMORY_DENY.iter().map(|s| s.to_string()));
     deny.extend(spec.policy.deny_reads.iter().map(|p| format!("Read({p})")));
     deny.extend(CREDENTIAL_FILES.iter().map(|&(p, dir)| read_rule(p, dir)));
 
