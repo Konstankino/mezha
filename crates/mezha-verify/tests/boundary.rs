@@ -1396,3 +1396,45 @@ fn local_memory_is_scanned_on_this_machine_only() {
         detail(&r, "dreamer")
     );
 }
+
+#[test]
+fn a_failed_scheduled_dream_warns() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    f.memory(".github/CODEOWNERS", "* @owner\n");
+    f.commit_all();
+    assert_eq!(status(&f.verify(), "dreamer"), Status::Pass);
+    let dir = mezha_memory::dreams_dir(&f.home, &f.root);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("last-run.json"),
+        r#"{"v":1,"at":1800000000,"scheduled":true,"ok":false,"error":"implementer: it reached its budget"}"#,
+    )
+    .unwrap();
+    let r = f.verify();
+    assert_eq!(status(&r, "dreamer"), Status::Warn);
+    assert!(detail(&r, "dreamer").contains("the last scheduled dream (2027-01-15T08:00:00Z) failed: implementer: it reached its budget"), "{}", detail(&r, "dreamer"));
+    // A run by hand that failed is yours to see; no warning.
+    fs::write(
+        dir.join("last-run.json"),
+        r#"{"v":1,"at":1,"scheduled":false,"ok":false}"#,
+    )
+    .unwrap();
+    assert_eq!(status(&f.verify(), "dreamer"), Status::Pass);
+}
+
+#[test]
+fn auto_memory_off_turns_agent_memory_off() {
+    let f = Fixture::new("", GITHUB);
+    f.with_agents();
+    f.memory(".github/CODEOWNERS", "* @owner\n");
+    f.commit_all();
+    f.user_settings(json!({ "autoMemoryEnabled": false }));
+    let r = f.verify();
+    assert_eq!(status(&r, "dreamer"), Status::Warn);
+    assert!(
+        detail(&r, "dreamer").contains("turns agent memory off"),
+        "{}",
+        detail(&r, "dreamer")
+    );
+}

@@ -20,7 +20,9 @@ permissions_ask = ["git push"]
 deny_reads = [".env", "*.pem", "*.key"]
 
 # [memory]
-# dream_schedule = "manual"    # nightly | manual | cron
+# dream_schedule = "manual"    # nightly | manual | cron; see `mezha dream --schedule`
+# dream_at = "03:00"           # local time, for nightly
+# dream_cron = "15 2 * * 1-5"  # for cron
 # default_scope = "project"    # project | local | user
 # phi_repos = []               # repos whose agent memory must stay local
 # dream_model = "sonnet"       # the model `mezha dream` runs the dreamer on

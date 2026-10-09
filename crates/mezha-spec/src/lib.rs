@@ -5,6 +5,7 @@
 //! section 4 and returns every error and warning at once.
 
 mod bash_pattern;
+pub mod cron;
 mod model;
 mod names;
 mod prefix;

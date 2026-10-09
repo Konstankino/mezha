@@ -1,7 +1,12 @@
 //! `mezha`: a boundary, not a matcher.
 
+mod ab;
 mod approve;
 mod dream;
+mod files;
+mod git;
+mod metrics;
+mod schedule;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -83,6 +88,43 @@ enum Command {
         /// dreamer.
         #[arg(long)]
         dry_run: bool,
+        /// How a schedule runs it: project memory only, skipping roles whose
+        /// last dream is still pending.
+        #[arg(long, conflicts_with = "dry_run")]
+        scheduled: bool,
+        /// Print a snippet that runs `mezha dream --scheduled` every night:
+        /// launchd, systemd or cron. Installs nothing.
+        #[arg(long, value_name = "KIND", conflicts_with_all = ["roles", "since", "base", "dry_run", "scheduled"])]
+        schedule: Option<String>,
+    },
+    /// Show what sessions cost, how often work came back, what agents left
+    /// unresolved and whether dreams landed without edits. `--ab` runs the
+    /// A/B comparison of memory against emptied memory.
+    Metrics {
+        /// The window: 30d, 12h, a date or an ISO time.
+        #[arg(long)]
+        since: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Refresh the store under ~/.mezha/metrics and print nothing (for
+        /// schedules; every dream does it too).
+        #[arg(long, conflicts_with = "json")]
+        record: bool,
+        /// Run the A/B comparison from this task file. Spends money; asks
+        /// first.
+        #[arg(long, value_name = "TASKS_TOML", conflicts_with_all = ["json", "record", "since"])]
+        ab: Option<PathBuf>,
+        /// With --ab: how many times to run each task in each variant.
+        #[arg(long, default_value_t = 1, requires = "ab", value_parser = clap::value_parser!(u32).range(1..=20))]
+        repeat: u32,
+        /// With --ab: don't ask before spending.
+        #[arg(long, requires = "ab")]
+        yes: bool,
+        /// With --ab: run checks in your own process instead of in srt.
+        /// They run code the agent just wrote.
+        #[arg(long, requires = "ab")]
+        unsandboxed_check: bool,
     },
     /// Check that the boundary holds: the sandbox is in effect, an agent
     /// can't push, and nothing switched the gate off. Exit 0 = pass (maybe
@@ -188,6 +230,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             since,
             base,
             dry_run,
+            scheduled,
+            schedule,
         } => dream::run(
             &root,
             &dream::Options {
@@ -195,6 +239,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 since,
                 base,
                 dry_run,
+                scheduled,
+                schedule,
+            },
+        ),
+        Command::Metrics {
+            since,
+            json,
+            record,
+            ab,
+            repeat,
+            yes,
+            unsandboxed_check,
+        } => metrics::run(
+            &root,
+            &metrics::Options {
+                since,
+                json,
+                record,
+                ab,
+                repeat,
+                yes,
+                unsandboxed_check,
             },
         ),
         Command::Hook { .. } | Command::Verify { .. } => unreachable!("handled in main"),

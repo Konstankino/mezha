@@ -1,0 +1,5 @@
+{"type": "user", "uuid": "s1-1", "timestamp": "2026-10-08T10:00:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "Do the thing"}}
+{"type": "cost-state", "sessionId": "s1", "totalCostUSD": 1.2}
+{"type": "user", "uuid": "s2-1", "timestamp": "2026-10-08T11:00:00Z", "sessionId": "s2", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "Continue please"}}
+{"type": "cost-state", "sessionId": "s2", "totalCostUSD": 1.2}
+{"type": "cost-state", "sessionId": "s2", "totalCostUSD": 1.5}

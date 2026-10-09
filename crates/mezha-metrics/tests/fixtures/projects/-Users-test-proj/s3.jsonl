@@ -1,0 +1,1 @@
+{"type": "user", "uuid": "s3-1", "timestamp": "2026-10-08T12:00:00Z", "sessionId": "s3", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "Hi"}}

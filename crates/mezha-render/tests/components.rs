@@ -186,7 +186,15 @@ fn body_files_are_fenced_and_normalised() {
     let crlf = scratch(Some(b"\xef\xbb\xbfLine one.\r\nLine two.\r\n"));
     let r = render_dir(crlf.path());
     assert!(r.problems.is_empty(), "{:?}", r.problems);
-    assert!(r.files[".claude/agents/a.md"].ends_with("---\n\nLine one.\nLine two.\n"));
+    let agent = &r.files[".claude/agents/a.md"];
+    assert!(
+        agent.contains("---\n\nLine one.\nLine two.\n\n## Reporting (mezha)\n"),
+        "{agent}"
+    );
+    assert!(
+        agent.ends_with("Leave it out when you finished.\n"),
+        "{agent}"
+    );
     // A problem keeps only that file out; settings still render.
     assert!(
         render_dir(scratch(None).path())

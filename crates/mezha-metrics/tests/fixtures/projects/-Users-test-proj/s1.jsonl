@@ -1,0 +1,6 @@
+{"type": "user", "uuid": "s1-1", "timestamp": "2026-10-08T10:00:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "Do the thing"}}
+{"type": "cost-state", "sessionId": "s1", "totalCostUSD": 0.5}
+{"type": "user", "uuid": "s1-2", "timestamp": "2026-10-08T10:30:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "Now fix the tests"}}
+{"type": "user", "uuid": "s1-3", "timestamp": "2026-10-08T10:31:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}}
+{"type": "cost-state", "sessionId": "s1", "totalCostUSD": 1.2}
+{"type": "custom-title", "customTitle": "x", "sessionId": "s1"}

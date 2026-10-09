@@ -217,6 +217,36 @@ pub fn settings(ctx: &Ctx, layers: &Layers) -> (Value, Masked) {
     (value, masked)
 }
 
+/// srt settings for running a command the way a session's sandbox would:
+/// [`settings`], plus writes to `cwd` (a worktree of the project), the temp
+/// directory and the effective `sandbox.filesystem.allowWrite`, minus
+/// `denyWrite`. Project-relative paths are resolved against `cwd`. The
+/// A/B runner uses it for checks, which run code an agent just wrote.
+pub fn command_settings(ctx: &Ctx, layers: &Layers, cwd: &Path) -> Value {
+    let (mut value, _) = settings(ctx, layers);
+    let here = Ctx {
+        root: cwd.to_path_buf(),
+        ..ctx.clone()
+    };
+    let resolved = |pointer: &str| -> Vec<String> {
+        layers
+            .strings(pointer)
+            .into_iter()
+            .filter_map(|(p, _)| here.resolve(p))
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    };
+    let mut allow = vec![
+        cwd.to_string_lossy().into_owned(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
+    ];
+    allow.extend(resolved("/sandbox/filesystem/allowWrite"));
+    dedup(&mut allow);
+    value["filesystem"]["allowWrite"] = json!(allow);
+    value["filesystem"]["denyWrite"] = json!(resolved("/sandbox/filesystem/denyWrite"));
+    value
+}
+
 fn dedup(list: &mut Vec<String>) {
     let mut seen = std::collections::BTreeSet::new();
     list.retain(|s| seen.insert(s.clone()));

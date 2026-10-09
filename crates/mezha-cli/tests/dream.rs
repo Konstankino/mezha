@@ -113,7 +113,12 @@ fn line(value: serde_json::Value) -> String {
 
 /// A session of this project in which `role` ran once, an hour ago.
 fn transcript(p: &Project, role: &str, id: &str) {
-    let ts = |ago: u64| format_iso((now() - ago) as i64);
+    transcript_ago(p, role, id, 0);
+}
+
+/// The same, `sooner` seconds later.
+fn transcript_ago(p: &Project, role: &str, id: &str, sooner: u64) {
+    let ts = |ago: u64| format_iso((now() - ago + sooner) as i64);
     let dir = p
         .home
         .join(".claude/projects")
@@ -441,4 +446,184 @@ fn refuses_memory_behind_a_symlink() {
     assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
     assert!(stderr(&out).contains("is a symlink"), "{}", stderr(&out));
     assert!(s.branches().is_empty());
+}
+
+impl Setup {
+    /// Any mezha command, with the stand-in claude and the real mezha on PATH.
+    fn cmd(&self, args: &[&str], mode: &str, extra: &[(&str, &str)]) -> Output {
+        let mezha_dir = Path::new(common::BIN).parent().unwrap();
+        let path = format!(
+            "{}:{}:/usr/bin:/bin",
+            self.bin.display(),
+            mezha_dir.display()
+        );
+        let mut env = vec![("PATH", path.as_str()), ("FAKE_MODE", mode)];
+        env.extend_from_slice(extra);
+        self.p.mezha_env(args, &env)
+    }
+
+    fn nightly(&self) {
+        self.p.write_spec(&format!(
+            "{SPEC}\n[memory]\ndream_schedule = \"nightly\"\ndream_at = \"02:30\"\n"
+        ));
+    }
+
+    fn last_run(&self) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(self.dreams().join("last-run.json")).unwrap())
+            .unwrap()
+    }
+}
+
+#[test]
+fn schedules_are_printed_not_installed() {
+    let s = setup();
+    let out = s.cmd(&["dream", "--schedule", "launchd"], "write", &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("dream_schedule = \"manual\""),
+        "{}",
+        stderr(&out)
+    );
+
+    s.nightly();
+    let out = s.cmd(&["dream", "--schedule", "launchd"], "write", &[]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    let mezha = Path::new(common::BIN);
+    for want in [
+        format!("<string>{}</string>", mezha.display()),
+        format!("<string>{}</string>", s.p.root.display()),
+        "<string>--scheduled</string>".to_string(),
+        "<integer>2</integer>".to_string(),
+        "<integer>30</integer>".to_string(),
+        "launchctl bootstrap gui/$(id -u)".to_string(),
+    ] {
+        assert!(o.contains(&want), "{want}: {o}");
+    }
+    assert!(!s.p.home.join("Library").exists(), "nothing is installed");
+    assert!(s.dreams().is_dir(), "the log's directory exists");
+
+    let o = stdout(&s.cmd(&["dream", "--schedule", "systemd"], "write", &[]));
+    assert!(o.contains("OnCalendar=*-*-* 02:30:00"), "{o}");
+    let o = stdout(&s.cmd(&["dream", "--schedule", "cron"], "write", &[]));
+    assert!(o.contains("30 2 * * * env PATH="), "{o}");
+    let bad = s.cmd(&["dream", "--schedule", "anacron"], "write", &[]);
+    assert!(stderr(&bad).contains("launchd, systemd or cron"));
+}
+
+#[test]
+fn scheduled_dreams_skip_what_needs_you() {
+    let s = setup();
+    transcript(&s.p, "clinician", "c1");
+    let out = s.dream("write", &["--scheduled"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(
+        o.contains("Skipping clinician: its local memory needs you at a terminal."),
+        "{o}"
+    );
+    let first = s.branches();
+    assert_eq!(first.len(), 1);
+    let last = s.last_run();
+    assert_eq!(
+        (last["ok"].as_bool(), last["scheduled"].as_bool()),
+        (Some(true), Some(true))
+    );
+
+    // A new run, but the last dream is still on its branch: skipped.
+    transcript_ago(&s.p, "implementer", "a2", 600);
+    let out = s.dream("write", &["--scheduled"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(
+        o.contains("Skipping implementer: its last dream on mezha/dream-"),
+        "{o}"
+    );
+    assert!(o.contains("Nothing to dream about tonight."), "{o}");
+
+    // Merged as it was: decided, and the next night dreams again.
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-verify",
+            "-m",
+            "Merge the dream",
+            &first[0],
+        ],
+    );
+    let report = s.cmd(&["metrics", "--json"], "write", &[]);
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["dreams"]["without_edits"], 1, "{json}");
+    assert_eq!(json["dreams"]["pending"], 0, "{json}");
+    // The stand-in writes the lesson that just landed, so: no changes.
+    let out = s.dream("write", &["--scheduled"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(o.contains("Dreaming implementer"), "{o}");
+    assert!(o.contains("no changes"), "{o}");
+}
+
+#[test]
+fn a_refused_dream_stops_the_schedule_and_says_why() {
+    let s = setup();
+    let out = s.dream("outside", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1));
+    let last = s.last_run();
+    assert_eq!(last["ok"], false);
+    assert!(
+        last["error"].as_str().unwrap().contains("worktree changed"),
+        "{last}"
+    );
+    let out = s.dream("write", &["--scheduled"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("a refused dream is waiting for you"),
+        "{}",
+        stderr(&out)
+    );
+    let report = stdout(&s.cmd(&["metrics"], "write", &[]));
+    assert!(report.contains("Last dream"), "{report}");
+    assert!(report.contains("FAILED"), "{report}");
+}
+
+#[test]
+fn one_dream_at_a_time() {
+    let s = setup();
+    fs::create_dir_all(s.dreams()).unwrap();
+    let _held = mezha_memory::lock::try_lock(&s.dreams().join("dream.lock"), "pid 42").unwrap();
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("another dream of this project is running (pid 42)"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn metrics_record_and_report() {
+    let s = setup();
+    let out = s.cmd(&["metrics", "--record"], "write", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).is_empty());
+    let file = mezha_memory::metrics_dir(&s.p.home, &s.p.root).join("sessions.jsonl");
+    let lines = || fs::read_to_string(&file).unwrap().lines().count();
+    assert_eq!(lines(), 1);
+    s.cmd(&["metrics", "--record"], "write", &[]);
+    assert_eq!(lines(), 1, "recording twice adds nothing");
+
+    let report = s.cmd(&["metrics", "--json"], "write", &[]);
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["sessions"], 1);
+    assert_eq!(json["roles"]["implementer"]["runs"], 1);
+    assert_eq!(json["roles"]["implementer"]["with_lessons"], 1);
+    let human = stdout(&s.cmd(&["metrics"], "write", &[]));
+    assert!(human.contains("1 session(s)"), "{human}");
+
+    let inside = s.cmd(&["metrics", "--record"], "write", &[("CLAUDECODE", "1")]);
+    assert_eq!(inside.status.code(), Some(1));
 }

@@ -1,0 +1,2 @@
+{"type": "user", "uuid": "s4-1", "timestamp": "2026-10-08T13:00:00Z", "sessionId": "s4", "cwd": "/Users/test/proj-foo", "origin": {"kind": "human"}, "message": {"role": "user", "content": "other"}}
+{"type": "cost-state", "sessionId": "s4", "totalCostUSD": 9.0}

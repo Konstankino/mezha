@@ -345,6 +345,7 @@ dependencies = [
  "mezha-broker",
  "mezha-hooks",
  "mezha-memory",
+ "mezha-metrics",
  "mezha-render",
  "mezha-spec",
  "mezha-verify",
@@ -381,6 +382,7 @@ dependencies = [
  "mezha-broker",
  "mezha-spec",
  "regex",
+ "rustix",
  "serde_json",
  "similar",
  "tempfile",
@@ -389,6 +391,14 @@ dependencies = [
 [[package]]
 name = "mezha-metrics"
 version = "0.0.1"
+dependencies = [
+ "mezha-memory",
+ "mezha-spec",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "mezha-render"

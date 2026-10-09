@@ -1,0 +1,2 @@
+{"type": "user", "uuid": "x9-1", "timestamp": "2026-10-08T10:02:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "origin": {"kind": "human"}, "message": {"role": "user", "content": "explore"}, "isSidechain": true}
+{"type": "assistant", "uuid": "x9-2", "timestamp": "2026-10-08T10:03:00Z", "sessionId": "s1", "cwd": "/Users/test/proj", "isSidechain": true, "message": {"id": "mx", "role": "assistant", "content": [{"type": "text", "text": "found"}], "usage": {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 10}}}

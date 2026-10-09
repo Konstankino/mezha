@@ -23,9 +23,6 @@ use crate::time::format_iso;
 /// The dreamer's tools, as Claude Code lists them in `system/init`.
 pub const TOOLS: [&str; 5] = ["Edit", "Glob", "Grep", "Read", "Write"];
 
-/// The oldest Claude Code the dream invocation was checked against.
-pub const MIN_CLAUDE_CODE: (u32, u32, u32) = (2, 1, 285);
-
 const BASE_PROMPT: &str = "\
 You are mezha's dreamer. You maintain the long-term memory of one Claude Code subagent role, \
 from digests of its recent runs. A person reviews every change you make before any agent sees it.
@@ -291,79 +288,6 @@ pub fn check_init(event: &Value) -> Result<Init, String> {
     })
 }
 
-/// The end of a run, from the `result` event.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Outcome {
-    pub summary: String,
-    pub turns: u64,
-    pub cost_usd: f64,
-    pub denials: Vec<String>,
-}
-
-/// Reads the `result` event. A run that didn't succeed is an error, whatever
-/// the subtype says: Claude Code reports a failed login as `success` with
-/// `is_error: true`.
-pub fn read_result(event: &Value) -> Result<Outcome, String> {
-    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
-    let is_error = event.get("is_error").and_then(Value::as_bool) != Some(false);
-    let summary = event
-        .get("result")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if subtype != "success" || is_error {
-        let mut why = match subtype {
-            "error_max_turns" => "it ran out of turns".to_string(),
-            "error_max_budget_usd" => "it reached its budget".to_string(),
-            "" => "it reported no result".to_string(),
-            other => format!("it ended with {other}"),
-        };
-        if let Some(reason) = event.get("terminal_reason").and_then(Value::as_str) {
-            why.push_str(&format!(" ({reason})"));
-        }
-        let errors: Vec<&str> = event
-            .get("errors")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if !errors.is_empty() {
-            why.push_str(&format!(": {}", crate::scan::escape(&errors.join("; "))));
-        }
-        if !summary.is_empty() {
-            why.push_str(&format!(
-                ": {}",
-                crate::scan::escape(&crate::inbox::cut(&summary, 300))
-            ));
-        }
-        return Err(why);
-    }
-    let denials = event
-        .get("permission_denials")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|d| {
-            let tool = d.get("tool_name").and_then(Value::as_str).unwrap_or("?");
-            let input = d
-                .get("tool_input")
-                .map(Value::to_string)
-                .unwrap_or_default();
-            format!("{tool} {}", crate::inbox::cut(&input, 200))
-        })
-        .collect();
-    Ok(Outcome {
-        summary,
-        turns: event.get("num_turns").and_then(Value::as_u64).unwrap_or(0),
-        cost_usd: event
-            .get("total_cost_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
-        denials,
-    })
-}
-
 /// True when the dreamer said it changed nothing.
 pub fn said_no_changes(summary: &str) -> bool {
     summary
@@ -436,13 +360,6 @@ pub fn forward(user_settings: &Value) -> Forwarded {
         }
     }
     out
-}
-
-/// `2.1.285 (Claude Code)` as numbers.
-pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
-    let word = text.split_whitespace().next()?;
-    let mut parts = word.split('.').map(|p| p.parse::<u32>().ok());
-    Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
 #[cfg(test)]
@@ -523,31 +440,10 @@ mod tests {
     }
 
     #[test]
-    fn results() {
-        let failed_login = json!({"type": "result", "subtype": "success", "is_error": true,
-            "terminal_reason": "api_error", "result": "Failed to authenticate"});
-        let e = read_result(&failed_login).unwrap_err();
-        assert!(
-            e.contains("api_error") && e.contains("Failed to authenticate"),
-            "{e}"
-        );
-        // As Claude Code 2.1.285 reports a spent budget.
-        let e = read_result(&json!({"subtype": "error_max_budget_usd", "is_error": true,
-            "terminal_reason": "budget_exhausted", "errors": ["Reached maximum budget ($0.0001)"]}))
-        .unwrap_err();
-        assert_eq!(
-            e,
-            "it reached its budget (budget_exhausted): Reached maximum budget ($0.0001)"
-        );
-        let ok = read_result(
-            &json!({"subtype": "success", "is_error": false, "result": "no changes",
-            "num_turns": 3, "total_cost_usd": 0.12,
-            "permission_denials": [{"tool_name": "Write", "tool_input": {"file_path": "/etc/x"}}]}),
-        )
-        .unwrap();
-        assert!(said_no_changes(&ok.summary));
-        assert_eq!(ok.turns, 3);
-        assert_eq!(ok.denials, [r#"Write {"file_path":"/etc/x"}"#]);
+    fn no_changes() {
+        assert!(said_no_changes("no changes"));
+        assert!(said_no_changes("`No changes.`"));
+        assert!(!said_no_changes("Added a lesson."));
     }
 
     #[test]
@@ -568,11 +464,5 @@ mod tests {
         assert_eq!(s["apiKeyHelper"], "~/bin/key");
         assert_eq!(s["autoMemoryEnabled"], false);
         assert!(s.get("permissions").is_none());
-    }
-
-    #[test]
-    fn versions() {
-        assert_eq!(parse_version("2.1.285 (Claude Code)"), Some((2, 1, 285)));
-        assert_eq!(parse_version("garbage"), None);
     }
 }

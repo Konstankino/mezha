@@ -15,7 +15,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mezha_memory::dreamer::{self, Forwarded, Init, Outcome};
+use mezha_memory::claude::{self, Outcome};
+use mezha_memory::dreamer::{self, Forwarded, Init};
 use mezha_memory::inbox::{self, RoleInbox};
 use mezha_memory::review::{self, Change, Review, Snapshot};
 use mezha_memory::scan::escape;
@@ -26,6 +27,9 @@ use mezha_verify::Ctx;
 use mezha_verify::runner::{self, Next, Run};
 use serde_json::Value;
 
+use crate::files::{create_private_dir, fresh_dir, replace_file, shell_word};
+use crate::git::{Git, resolve_base};
+
 /// How long one role's dreamer may run.
 const DREAM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Default `--since` without a cursor.
@@ -33,11 +37,29 @@ const DEFAULT_SINCE: &str = "7d";
 /// Finished dreams kept under `~/.mezha/dreams/<repo>/`.
 const KEEP_DREAMS: usize = 5;
 
+/// `~/.mezha/dreams/<repo>/last-run.json`: how the last dream ended.
+pub const LAST_RUN: &str = "last-run.json";
+const LOCK: &str = "dream.lock";
+
 pub struct Options {
     pub roles: Vec<String>,
     pub since: Option<String>,
     pub base: Option<String>,
     pub dry_run: bool,
+    /// The mode a schedule runs: project roles only, nothing pending.
+    pub scheduled: bool,
+    /// Print a schedule snippet instead of dreaming.
+    pub schedule: Option<String>,
+}
+
+/// What `last-run.json` records.
+#[derive(Default)]
+struct LastRun {
+    dir: Option<PathBuf>,
+    ok: bool,
+    roles: Vec<String>,
+    cost_usd: f64,
+    error: Option<String>,
 }
 
 /// Why `dream` won't run here, if it won't.
@@ -68,6 +90,34 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         bail!("{why}");
     }
     let root = std::fs::canonicalize(root).with_context(|| root.display().to_string())?;
+    if let Some(kind) = &opts.schedule {
+        return crate::schedule::print(&root, kind);
+    }
+    let mut last = LastRun::default();
+    let result = dream(&root, opts, &mut last);
+    if let Some(dir) = &last.dir {
+        let error = match &result {
+            Err(e) => Some(format!("{e:#}")),
+            Ok(_) if !last.ok => last.error.clone().or(Some("refused".into())),
+            Ok(_) => None,
+        };
+        let record = serde_json::json!({
+            "v": 1,
+            "at": super::now(),
+            "scheduled": opts.scheduled,
+            "ok": error.is_none(),
+            "roles": last.roles,
+            "cost_usd": last.cost_usd,
+            "error": error,
+        });
+        let _ =
+            mezha_memory::write_private(&dir.join(LAST_RUN), format!("{record:#}\n").as_bytes());
+    }
+    result
+}
+
+fn dream(root: &Path, opts: &Options, last: &mut LastRun) -> Result<ExitCode> {
+    let root = root.to_path_buf();
     let Some((spec, _)) = super::load(&root)? else {
         return Ok(ExitCode::FAILURE);
     };
@@ -77,12 +127,68 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
     let home = ctx.home.clone().context("can't find the home directory")?;
     let now = super::now() as i64;
 
-    let chosen = choose_roles(&spec, &opts.roles)?;
+    let mut chosen = choose_roles(&spec, &opts.roles)?;
     let dreams = mezha_memory::dreams_dir(&home, &root);
     create_private_dir(&dreams)?;
-    let no_hooks = dreams.join("no-hooks");
-    create_private_dir(&no_hooks)?;
-    let git = Git::new(&ctx, &no_hooks)?;
+    last.dir = Some(dreams.clone());
+    let note = format!("pid {} since {}", std::process::id(), format_iso(now));
+    let _lock = match mezha_memory::lock::try_lock(&dreams.join(LOCK), &note) {
+        Ok(lock) => lock,
+        Err(mezha_memory::lock::LockError::Busy(holder)) => {
+            last.dir = None;
+            bail!("another dream of this project is running ({holder}); try again when it ends");
+        }
+        Err(e) => bail!("can't lock {}: {e}", dreams.join(LOCK).display()),
+    };
+    let git = Git::new(&ctx)?;
+    let kept = refused_dreams(&dreams);
+    if opts.scheduled {
+        // Nobody is at a terminal to confirm local or user memory, and a
+        // refused dream waits for you before the next one.
+        chosen.retain(|(name, scope)| {
+            let keep = *scope == Scope::Project;
+            if !keep {
+                println!(
+                    "Skipping {name}: its {} memory needs you at a terminal.",
+                    scope.as_str()
+                );
+            }
+            keep
+        });
+        if !kept.is_empty() {
+            bail!(
+                "a refused dream is waiting for you; read it, then remove its worktree with `git worktree remove --force <path>`: {}",
+                kept.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let project = crate::metrics::Project::open(&ctx, &root)?;
+        let pending = pending_roles(&project.dreams(true)?);
+        chosen.retain(|(name, _)| match pending.get(*name) {
+            Some(branch) => {
+                println!(
+                    "Skipping {name}: its last dream on {branch} hasn't been merged or dropped yet."
+                );
+                false
+            }
+            None => true,
+        });
+        if chosen.is_empty() {
+            last.ok = true;
+            println!("Nothing to dream about tonight.");
+            return Ok(ExitCode::SUCCESS);
+        }
+    } else if !kept.is_empty() {
+        eprintln!(
+            "note: refused dreams still have worktrees: {}",
+            kept.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     let prefix = git
         .out(&root, &["rev-parse", "--show-prefix"])?
@@ -234,8 +340,14 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
             "note: .claude/agent-memory has uncommitted changes here; the dream starts from {base_name} without them"
         );
     }
+    if !opts.dry_run
+        && let Err(e) = crate::metrics::record_sessions(&ctx, &spec, &root)
+    {
+        eprintln!("note: couldn't record metrics: {e:#}");
+    }
     roles.retain(|r| !r.inbox.digests.is_empty());
     if roles.is_empty() {
+        last.ok = true;
         println!("Nothing new to dream about.");
         return Ok(ExitCode::SUCCESS);
     }
@@ -259,7 +371,15 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         .find(|l| l.scope == mezha_verify::layers::Scope::User)
         .map(|l| l.value.clone())
         .unwrap_or(Value::Null);
-    let forwarded = dreamer::forward(&user_settings);
+    let mut forwarded = dreamer::forward(&user_settings);
+    if opts.scheduled {
+        // These may open a browser and wait for you.
+        for key in ["awsAuthRefresh", "gcpAuthRefresh"] {
+            if forwarded.settings.remove(key).is_some() {
+                println!("Not using {key} unattended; the run relies on cached credentials.");
+            }
+        }
+    }
     if !forwarded.env.is_empty() || !forwarded.settings.is_empty() {
         let mut names: Vec<&str> = forwarded.env.iter().map(|(k, _)| k.as_str()).collect();
         names.extend(forwarded.settings.keys().map(String::as_str));
@@ -277,6 +397,7 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
             max_turns: spec.memory.dream_max_turns(),
             budget_usd: spec.memory.dream_budget_usd(),
         });
+        last.ok = true;
         println!(
             "Dry run: no dreamer ran. Each role would run, in a worktree of {base_name}:\n  claude {}",
             args.iter()
@@ -329,6 +450,9 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         forwarded: &forwarded,
         phi,
         now,
+        stamp: stamp.clone(),
+        branch: branch.clone(),
+        store: mezha_metrics::store::Store::new(&mezha_memory::metrics_dir(&home, &root)),
         commits: Vec::new(),
         pending: Vec::new(),
         cost: 0.0,
@@ -344,6 +468,9 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
                 done.push(result);
             }
             Err(refused) => {
+                last.cost_usd = dream.cost;
+                last.roles = dream.commits.iter().map(|c| c.role.clone()).collect();
+                last.error = Some(format!("{}: {}", role.name, refused.trim()));
                 eprintln!("\nThe dream of {} was refused:\n{refused}", role.name);
                 eprintln!(
                     "Nothing more was committed or applied. The workspace stays for you to read: {}",
@@ -372,9 +499,11 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
             Ok(true) => {
                 cursors.insert(p.role.clone(), p.through);
                 cursor::store(&cursor_file, &cursors)?;
+                dream.record(&p.role, p.scope, None, p.runs, p.turns, p.cost_usd, true);
             }
             Ok(false) => {}
             Err(refused) => {
+                last.error = Some(format!("{}: {}", p.role, refused.trim()));
                 eprintln!("\n{}: {refused}", p.role);
                 return Ok(ExitCode::FAILURE);
             }
@@ -386,6 +515,9 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         &["worktree", "remove", "--force", &wt.to_string_lossy()],
     )?;
     println!("\nThe dream cost ${:.2}.", dream.cost);
+    last.ok = true;
+    last.cost_usd = dream.cost;
+    last.roles = done.iter().map(|r| r.role.clone()).collect();
     if dream.commits.is_empty() {
         git.out(&root, &["branch", "-D", "--quiet", &branch])?;
         println!("No project memory changed, so there is nothing to push.");
@@ -433,54 +565,6 @@ fn choose_roles<'a>(spec: &'a Spec, wanted: &[String]) -> Result<Vec<(&'a str, S
                 })
         })
         .collect()
-}
-
-/// The commit to start from: `--base`, else `origin/HEAD`, else `HEAD`.
-fn resolve_base(git: &Git, root: &Path, base: Option<&str>) -> Result<(String, String)> {
-    if let Some(base) = base {
-        if base.starts_with('-') {
-            bail!("--base `{base}` is not a revision");
-        }
-        let sha = git
-            .out(
-                root,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{base}^{{commit}}"),
-                ],
-            )
-            .with_context(|| format!("--base {base} is not a commit"))?;
-        return Ok((sha.trim().to_string(), base.to_string()));
-    }
-    if let Ok(sha) = git.out(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/HEAD^{commit}",
-        ],
-    ) {
-        let name = git
-            .out(
-                root,
-                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            )
-            .map(|n| n.trim().to_string())
-            .unwrap_or_else(|_| "origin/HEAD".into());
-        return Ok((sha.trim().to_string(), name));
-    }
-    let sha = git
-        .out(root, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-        .context("the repository has no commits yet")?;
-    let name = git
-        .out(root, &["symbolic-ref", "--short", "--quiet", "HEAD"])
-        .map(|n| n.trim().to_string())
-        .unwrap_or_else(|_| "HEAD".into());
-    eprintln!("note: no origin/HEAD, so the dream starts from {name}; pass --base to choose");
-    Ok((sha.trim().to_string(), name))
 }
 
 /// Refuses memory reached through a symlink: at the base commit for project
@@ -566,11 +650,11 @@ fn claude_version(ctx: &Ctx, claude: &Path) -> Result<String> {
         },
     )?;
     let text = out.stdout.trim().to_string();
-    let Some(version) = dreamer::parse_version(&text) else {
+    let Some(version) = claude::parse_version(&text) else {
         bail!("`claude --version` said {:?}, not a version", escape(&text));
     };
-    if version < dreamer::MIN_CLAUDE_CODE {
-        let (a, b, c) = dreamer::MIN_CLAUDE_CODE;
+    if version < claude::MIN_CLAUDE_CODE {
+        let (a, b, c) = claude::MIN_CLAUDE_CODE;
         bail!("Claude Code {text} is older than {a}.{b}.{c}, which mezha dream needs; update it");
     }
     Ok(text.split_whitespace().next().unwrap_or("").to_string())
@@ -578,6 +662,7 @@ fn claude_version(ctx: &Ctx, claude: &Path) -> Result<String> {
 
 /// A finished role.
 struct RoleResult {
+    role: String,
     /// Where the cursor moves: after a commit or "no changes", not before a
     /// confirmation.
     advance: Option<i64>,
@@ -596,6 +681,10 @@ struct Commit {
 /// A local or user role waiting for your confirmation.
 struct Pending {
     role: String,
+    scope: Scope,
+    runs: usize,
+    turns: u64,
+    cost_usd: f64,
     dir: PathBuf,
     /// The real directory when it was staged.
     original: Snapshot,
@@ -618,12 +707,59 @@ struct Dream<'a> {
     forwarded: &'a Forwarded,
     phi: bool,
     now: i64,
+    stamp: String,
+    branch: String,
+    /// The metrics store, where each commit and apply is recorded.
+    store: mezha_metrics::store::Store,
     commits: Vec<Commit>,
     pending: Vec<Pending>,
     cost: f64,
 }
 
 impl Dream<'_> {
+    /// Records a commit (with the patch-id of its memory change) or an
+    /// applied local role in the metrics store. Metrics are a side matter:
+    /// a failure here is a note, not a refusal.
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        role: &str,
+        scope: Scope,
+        commit: Option<(String, String, Option<String>)>,
+        runs: usize,
+        turns: u64,
+        cost_usd: f64,
+        applied: bool,
+    ) {
+        let (commit, dir, patch_id) = match commit {
+            Some((c, d, p)) => (Some(c), Some(d), p),
+            None => (None, None, None),
+        };
+        let row = mezha_metrics::dreams::DreamRow {
+            v: mezha_metrics::store::VERSION,
+            key: format!("{}/{role}", self.stamp),
+            stamp: self.stamp.clone(),
+            role: role.to_string(),
+            scope: scope.as_str().to_string(),
+            at: self.now,
+            runs,
+            turns,
+            cost_usd,
+            branch: (scope == Scope::Project).then(|| self.branch.clone()),
+            commit,
+            dir,
+            patch_id,
+            applied,
+            outcome: None,
+        };
+        let stored = serde_json::to_value(&row)
+            .map_err(std::io::Error::other)
+            .and_then(|v| self.store.upsert(mezha_metrics::store::DREAMS, "key", &[v]));
+        if let Err(e) = stored {
+            eprintln!("note: couldn't record the dream in the metrics store: {e}");
+        }
+    }
+
     /// Runs one role's dreamer and reviews the result. `Err` is a refusal.
     fn role(&mut self, role: &Role, config: &Path, root: &Path) -> Result<RoleResult, String> {
         let source = match role.scope {
@@ -736,6 +872,7 @@ impl Dream<'_> {
         if r.changes.is_empty() {
             println!("  no changes");
             return Ok(RoleResult {
+                role: role.name.to_string(),
                 advance: Some(through),
             });
         }
@@ -757,15 +894,40 @@ impl Dream<'_> {
         if role.scope != Scope::Project {
             self.pending.push(Pending {
                 role: role.name.to_string(),
+                scope: role.scope,
+                runs: entry.runs,
+                turns: outcome.turns,
+                cost_usd: outcome.cost_usd,
                 dir: source,
                 original,
                 changes: r.changes,
                 changelog: log,
                 through,
             });
-            return Ok(RoleResult { advance: None });
+            return Ok(RoleResult {
+                role: role.name.to_string(),
+                advance: None,
+            });
         }
-        self.commit(role, &r.changes, &log, &entry)?;
+        let dir = self.commit(role, &r.changes, &log, &entry)?;
+        let patch_id = crate::metrics::memory_patch_id(self.git, self.wt, "HEAD^1", "HEAD", &dir)
+            .unwrap_or_else(|e| {
+                eprintln!("note: couldn't compute the patch-id for metrics: {e:#}");
+                None
+            });
+        let head = self
+            .git
+            .run_ok(self.wt, &["rev-parse", "HEAD"], b"")
+            .unwrap_or_default();
+        self.record(
+            role.name,
+            role.scope,
+            Some((head.trim().to_string(), dir, patch_id)),
+            entry.runs,
+            outcome.turns,
+            outcome.cost_usd,
+            false,
+        );
         self.commits.push(Commit {
             role: role.name.to_string(),
             runs: entry.runs,
@@ -775,6 +937,7 @@ impl Dream<'_> {
             phrases: r.phrases,
         });
         Ok(RoleResult {
+            role: role.name.to_string(),
             advance: Some(through),
         })
     }
@@ -869,7 +1032,7 @@ impl Dream<'_> {
             ));
         };
         let outcome =
-            dreamer::read_result(&result).map_err(|why| format!("  the dreamer failed: {why}"))?;
+            claude::read_result(&result).map_err(|why| format!("  the dreamer failed: {why}"))?;
         Ok((init, outcome))
     }
 
@@ -881,7 +1044,7 @@ impl Dream<'_> {
         changes: &[Change],
         log: &str,
         entry: &changelog::Entry,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let git = self.git;
         let dir = format!("{}.claude/agent-memory/{}", self.prefix, role.name);
         let put = |name: &str, content: Option<&str>| -> Result<(), String> {
@@ -957,7 +1120,7 @@ impl Dream<'_> {
         // role starts from a clean tree.
         git.run_ok(self.wt, &["reset", "--quiet", "--hard", "HEAD"], b"")?;
         println!("  committed {} file(s)", changes.len() + 1);
-        Ok(())
+        Ok(dir)
     }
 }
 
@@ -1074,20 +1237,61 @@ fn pr_body(stamp: &str, commits: &[Commit]) -> String {
         out.push('\n');
         out.push_str(&inbox::fenced(c.outcome.summary.trim()));
     }
+    // Kept by a squash merge that uses the PR description, so `mezha
+    // metrics` can tell which dream landed.
+    out.push('\n');
+    for c in commits {
+        out.push_str(&format!("mezha dream: {} ({} runs)\n", c.role, c.runs));
+    }
+    out.push_str(&format!("\nMezha-Dream: {stamp}\n"));
     out
 }
 
-/// A word for a shell command line, quoted when needed.
-fn shell_word(word: &str) -> String {
-    if !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@+%^{}".contains(c))
-    {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
+/// Dreams whose worktree is still there: refused, waiting for you.
+fn refused_dreams(dreams: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dreams)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            is_stamp_dir(&name) && p.join("wt").is_dir()
+        })
+        .map(|p| p.join("wt"))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Roles whose newest project dream is still pending, with its branch.
+fn pending_roles(
+    dreams: &[(
+        mezha_metrics::dreams::DreamRow,
+        Option<mezha_metrics::dreams::Status>,
+    )],
+) -> std::collections::BTreeMap<String, String> {
+    let mut newest: std::collections::BTreeMap<
+        String,
+        &(
+            mezha_metrics::dreams::DreamRow,
+            Option<mezha_metrics::dreams::Status>,
+        ),
+    > = std::collections::BTreeMap::new();
+    for entry in dreams.iter().filter(|(d, _)| d.scope == "project") {
+        let slot = newest.entry(entry.0.role.clone()).or_insert(entry);
+        if entry.0.at > slot.0.at {
+            *slot = entry;
+        }
     }
+    newest
+        .into_iter()
+        .filter(|(_, (_, status))| *status == Some(mezha_metrics::dreams::Status::Pending))
+        .map(|(role, (d, _))| (role, d.branch.clone().unwrap_or_default()))
+        .collect()
 }
 
 /// Removes finished dreams beyond the newest few. A dream whose worktree is
@@ -1128,182 +1332,6 @@ fn is_stamp_dir(name: &str) -> bool {
             || suffix
                 .strip_prefix('-')
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
-}
-
-/// `<parent>/<name>`, or `<name>-2` and so on when it exists.
-fn fresh_dir(parent: &Path, name: &str) -> Result<PathBuf> {
-    for n in 1..100 {
-        let dir = if n == 1 {
-            parent.join(name)
-        } else {
-            parent.join(format!("{name}-{n}"))
-        };
-        match create_private_dir_exclusive(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| dir.display().to_string()),
-        }
-    }
-    bail!("too many dreams named {name} in {}", parent.display())
-}
-
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
-}
-
-fn create_private_dir_exclusive(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().mode(0o700).create(dir)
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir(dir)
-}
-
-/// Writes `path` through a temporary file in the same directory.
-fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.mezha-tmp"));
-    let _ = std::fs::remove_file(&tmp);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    {
-        use std::io::Write;
-        let mut file = options.open(&tmp)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
-}
-
-/// git with the repository's hooks off and no config from the environment.
-struct Git<'a> {
-    ctx: &'a Ctx,
-    program: PathBuf,
-    hooks_path: String,
-}
-
-impl<'a> Git<'a> {
-    fn new(ctx: &'a Ctx, no_hooks: &Path) -> Result<Self> {
-        let found = ctx.which_trusted("git");
-        if let Some(note) = found.skipped_note("git") {
-            eprintln!("note: {note}");
-        }
-        let program = found
-            .path
-            .context("git is not on PATH (or only in a directory an agent could write)")?;
-        Ok(Git {
-            ctx,
-            program,
-            hooks_path: format!("core.hooksPath={}", no_hooks.display()),
-        })
-    }
-
-    fn run(&self, cwd: &Path, args: &[&str], stdin: &[u8]) -> std::io::Result<runner::Output> {
-        let mut full = vec!["-c", &self.hooks_path, "-c", "core.fsmonitor=false"];
-        full.extend_from_slice(args);
-        runner::run(
-            self.ctx,
-            &Run {
-                program: &self.program,
-                args: &full,
-                cwd,
-                env: &[("GIT_TERMINAL_PROMPT", "0")],
-                remove: &[
-                    "GIT_CONFIG_COUNT",
-                    "GIT_CONFIG_PARAMETERS",
-                    "GIT_DIR",
-                    "GIT_WORK_TREE",
-                    "GIT_INDEX_FILE",
-                    "GIT_OBJECT_DIRECTORY",
-                ],
-                stdin,
-                timeout: Duration::from_secs(300),
-            },
-        )
-    }
-
-    /// Stdout of a git command that must succeed.
-    fn run_ok(&self, cwd: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
-        let out = self
-            .run(cwd, args, stdin)
-            .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
-        if !out.success() {
-            return Err(format!(
-                "git {} failed: {}",
-                args.first().unwrap_or(&""),
-                escape(out.stderr.trim())
-            ));
-        }
-        Ok(out.stdout)
-    }
-
-    fn out(&self, cwd: &Path, args: &[&str]) -> Result<String> {
-        self.run_ok(cwd, args, b"").map_err(anyhow::Error::msg)
-    }
-
-    fn worktrees(&self, root: &Path) -> Result<Vec<PathBuf>> {
-        let listed = self.out(root, &["worktree", "list", "--porcelain", "-z"])?;
-        Ok(listed
-            .split('\0')
-            .filter_map(|l| l.strip_prefix("worktree "))
-            .map(PathBuf::from)
-            .filter(|p| p != root)
-            .collect())
-    }
-
-    fn unmerged_dreams(&self, root: &Path, base: &str) -> Result<Vec<String>> {
-        let listed = self.out(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "--no-merged",
-                base,
-                "refs/heads/mezha/",
-            ],
-        )?;
-        Ok(listed
-            .lines()
-            .filter(|b| b.starts_with("mezha/dream-"))
-            .map(str::to_string)
-            .collect())
-    }
-
-    fn fresh_branch(&self, root: &Path, name: &str) -> Result<String> {
-        for n in 1..100 {
-            let branch = if n == 1 {
-                name.to_string()
-            } else {
-                format!("{name}-{n}")
-            };
-            let exists = self
-                .run(
-                    root,
-                    &[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/heads/{branch}"),
-                    ],
-                    b"",
-                )?
-                .success();
-            if !exists {
-                return Ok(branch);
-            }
-        }
-        bail!("too many branches named {name}")
-    }
 }
 
 #[cfg(test)]

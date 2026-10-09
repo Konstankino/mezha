@@ -139,11 +139,70 @@ pub fn check(ctx: &Ctx, spec: &Spec, opts: &Options) -> Check {
     if roles.iter().any(|(_, s)| *s == Scope::Project) {
         codeowners(&mut f, &ctx.root, &roles);
     }
+    // Claude Code turns agent memory off together with auto memory.
+    let layers = crate::layers::Layers::load(ctx, opts.project_only);
+    let setting_off = layers
+        .winner("/autoMemoryEnabled")
+        .is_some_and(|(v, _)| v == &serde_json::Value::Bool(false));
+    let env_off = !opts.project_only
+        && ctx
+            .var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+            .is_some_and(|v| !matches!(v, "0" | "false"));
+    if setting_off || env_off {
+        f.warn(
+            format!(
+                "auto memory is off ({}), and Claude Code turns agent memory off with it: agents won't see their memory",
+                if setting_off {
+                    "autoMemoryEnabled = false"
+                } else {
+                    "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+                }
+            ),
+            Some("Turn auto memory back on, or take `memory` off the agents.".into()),
+        );
+    }
+    if !opts.project_only
+        && let Some(home) = &ctx.home
+    {
+        last_scheduled_run(&mut f, home, &ctx.root);
+    }
     f.into_check(
         Check::new(ID, TITLE, Kind::Integrity),
         "memory is clean and code owners review it; the dreamer exists only during `mezha dream`, \
          with Read, Grep, Glob, Edit and Write",
     )
+}
+
+/// Warns when the last dream a schedule ran failed: nobody was watching.
+fn last_scheduled_run(f: &mut Findings, home: &Path, root: &Path) {
+    let path = mezha_memory::dreams_dir(home, root).join("last-run.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(last) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let scheduled = last.get("scheduled").and_then(serde_json::Value::as_bool) == Some(true);
+    let ok = last.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+    if scheduled && !ok {
+        let at = last
+            .get("at")
+            .and_then(serde_json::Value::as_i64)
+            .map(mezha_memory::time::format_iso)
+            .unwrap_or_default();
+        let error = last
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(scan::escape)
+            .unwrap_or_default();
+        f.warn(
+            format!("the last scheduled dream ({at}) failed: {error}"),
+            Some(format!(
+                "Read {} and the schedule's log beside it, then run `mezha dream` yourself.",
+                path.display()
+            )),
+        );
+    }
 }
 
 /// Scans one memory file: hard markers (and PHI in committed memory of a

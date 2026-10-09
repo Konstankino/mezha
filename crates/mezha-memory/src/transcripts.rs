@@ -137,6 +137,28 @@ pub fn collect(
     dir_override: Option<&str>,
 ) -> Collected {
     let mut out = Collected::default();
+    let sources = project_sources(projects, roots, dir_override);
+    let mut seen = HashSet::new();
+    for file in &sources.files {
+        session(file, &sources.roots, roles, since, &mut seen, &mut out);
+    }
+    out.runs.sort_by(|a, b| (a.end, &a.id).cmp(&(b.end, &b.id)));
+    out
+}
+
+/// Where a project's sessions may be.
+#[derive(Debug, Clone, Default)]
+pub struct Sources {
+    /// Candidate session files (`<dir>/<session>.jsonl`), sorted.
+    pub files: Vec<PathBuf>,
+    /// The spellings of the roots a record's `cwd` must fall within.
+    pub roots: Vec<String>,
+}
+
+/// The session files in the project directories of `roots` (and their
+/// subdirectories, such as worktrees under `.claude/worktrees`). A file is
+/// only a candidate: [`in_roots`] decides from its records.
+pub fn project_sources(projects: &Path, roots: &[PathBuf], dir_override: Option<&str>) -> Sources {
     let mut roots_text: Vec<String> = Vec::new();
     for root in roots {
         roots_text.push(path_text(root));
@@ -153,8 +175,7 @@ pub fn collect(
             name[..name.len().min(NAME_MAX)].to_string()
         })
         .collect();
-
-    let mut seen = HashSet::new();
+    let mut files = Vec::new();
     for dir in sorted_entries(projects) {
         let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
@@ -166,14 +187,42 @@ pub fn collect(
         if !wanted || !dir.is_dir() {
             continue;
         }
-        for file in sorted_entries(&dir) {
-            if file.extension().is_some_and(|e| e == "jsonl") && file.is_file() {
-                session(&file, &roots_text, roles, since, &mut seen, &mut out);
-            }
-        }
+        files.extend(
+            sorted_entries(&dir)
+                .into_iter()
+                .filter(|f| f.extension().is_some_and(|e| e == "jsonl") && f.is_file()),
+        );
     }
-    out.runs.sort_by(|a, b| (a.end, &a.id).cmp(&(b.end, &b.id)));
-    out
+    Sources {
+        files,
+        roots: roots_text,
+    }
+}
+
+/// True when one of the records ran with its `cwd` inside one of `roots`.
+pub fn in_roots(records: &[Value], roots: &[String]) -> bool {
+    records.iter().any(|r| {
+        r.get("cwd")
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| roots.iter().any(|root| within(cwd, root)))
+    })
+}
+
+/// The subagent transcripts a session started, with their roles.
+pub fn subagent_files(session_file: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let mut found = Vec::new();
+    walk_subagents(
+        &session_file.with_extension("").join("subagents"),
+        0,
+        &mut found,
+    );
+    found
+        .into_iter()
+        .map(|path| {
+            let role = meta_role(&path);
+            (path, role)
+        })
+        .collect()
 }
 
 /// One session file and the subagents it started.
@@ -188,16 +237,10 @@ fn session(
     let Some(sid) = file.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
         return;
     };
-    let mut subagents = Vec::new();
-    walk_subagents(
-        &file.with_extension("").join("subagents"),
-        0,
-        &mut subagents,
-    );
-    let subagents: Vec<(PathBuf, String)> = subagents
+    let subagents: Vec<(PathBuf, String)> = subagent_files(file)
         .into_iter()
-        .filter_map(|path| {
-            let role = meta_role(&path)?;
+        .filter_map(|(path, role)| {
+            let role = role?;
             roles.contains(&role).then_some((path, role))
         })
         .collect();
@@ -213,12 +256,7 @@ fn session(
     let Some(parent) = read_records(file, out) else {
         return;
     };
-    let ours = parent.iter().any(|r| {
-        r.get("cwd")
-            .and_then(Value::as_str)
-            .is_some_and(|cwd| roots.iter().any(|root| within(cwd, root)))
-    });
-    if !ours {
+    if !in_roots(&parent, roots) {
         return;
     }
     out.sessions += 1;
@@ -287,6 +325,29 @@ fn build(records: &[&Value], role: &str, id: &str, session: &str, kind: RunKind)
         .filter(|b| !b.is_empty())
         .map(str::to_string);
 
+    let final_text = final_text(records);
+    let failures = failures(records);
+    if task.is_empty() && final_text.is_empty() && failures.is_empty() {
+        return None;
+    }
+    Some(Run {
+        role: role.to_string(),
+        id: id.to_string(),
+        session: session.to_string(),
+        kind,
+        start,
+        end,
+        branch,
+        task,
+        final_text,
+        failures,
+        followups: Vec::new(),
+    })
+}
+
+/// The agent's last message: the text blocks of the last assistant message
+/// that has text (one message is split into records sharing `message.id`).
+pub fn final_text(records: &[&Value]) -> String {
     // The last assistant message with text; its blocks share `message.id`.
     let mut final_id: Option<&str> = None;
     for r in records {
@@ -299,7 +360,7 @@ fn build(records: &[&Value], role: &str, id: &str, session: &str, kind: RunKind)
                 .or(Some(""));
         }
     }
-    let final_text = match final_id {
+    match final_id {
         Some(mid) => records
             .iter()
             .filter(|r| r.get("type").and_then(Value::as_str) == Some("assistant"))
@@ -314,8 +375,12 @@ fn build(records: &[&Value], role: &str, id: &str, session: &str, kind: RunKind)
             .collect::<Vec<_>>()
             .join("\n"),
         None => String::new(),
-    };
+    }
+}
 
+/// The tool calls that failed: a result marked `is_error`, or one whose
+/// `toolUseResult` is an error string.
+pub fn failures(records: &[&Value]) -> Vec<Failure> {
     let mut calls = std::collections::HashMap::new();
     let mut failures = Vec::new();
     for r in records {
@@ -354,22 +419,7 @@ fn build(records: &[&Value], role: &str, id: &str, session: &str, kind: RunKind)
             }
         }
     }
-    if task.is_empty() && final_text.is_empty() && failures.is_empty() {
-        return None;
-    }
-    Some(Run {
-        role: role.to_string(),
-        id: id.to_string(),
-        session: session.to_string(),
-        kind,
-        start,
-        end,
-        branch,
-        task,
-        final_text,
-        failures,
-        followups: Vec::new(),
-    })
+    failures
 }
 
 /// Your next prompt in the parent session after subagent `id` finished:
@@ -437,12 +487,12 @@ pub fn human_text(record: &Value) -> Option<String> {
     Some(text)
 }
 
-fn message_content(record: &Value) -> &Value {
+pub fn message_content(record: &Value) -> &Value {
     record.pointer("/message/content").unwrap_or(&Value::Null)
 }
 
 /// The text of message content: a string, or the text blocks of an array.
-fn content_text(content: &Value) -> String {
+pub fn content_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => blocks
@@ -474,13 +524,42 @@ fn short_input(call: &Value) -> String {
 /// The records of one transcript, deduplicated by `uuid` (resumed and
 /// forked sessions copy earlier records in). `None` when it can't be read.
 fn read_records(path: &Path, out: &mut Collected) -> Option<Vec<Value>> {
-    let file = fs::File::open(path).ok()?;
-    if file.metadata().ok()?.len() > MAX_FILE {
-        out.skipped_files += 1;
-        return None;
+    match read_transcript(path) {
+        Ok(t) => {
+            out.skipped_lines += t.skipped_lines;
+            Some(t.records)
+        }
+        Err(Unread::TooLarge) => {
+            out.skipped_files += 1;
+            None
+        }
+        Err(Unread::Unreadable) => None,
+    }
+}
+
+/// A transcript's records, deduplicated by `uuid`.
+#[derive(Debug, Clone, Default)]
+pub struct Transcript {
+    pub records: Vec<Value>,
+    /// Lines that weren't JSON objects or were too long.
+    pub skipped_lines: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    TooLarge,
+    Unreadable,
+}
+
+/// Reads one transcript leniently. Resumed and forked sessions copy earlier
+/// records in, so a record whose `uuid` was seen is skipped.
+pub fn read_transcript(path: &Path) -> Result<Transcript, Unread> {
+    let file = fs::File::open(path).map_err(|_| Unread::Unreadable)?;
+    if file.metadata().map_err(|_| Unread::Unreadable)?.len() > MAX_FILE {
+        return Err(Unread::TooLarge);
     }
     let mut reader = BufReader::new(file.take(MAX_FILE));
-    let mut records = Vec::new();
+    let mut out = Transcript::default();
     let mut uuids = HashSet::new();
     let mut line = Vec::new();
     loop {
@@ -488,7 +567,7 @@ fn read_records(path: &Path, out: &mut Collected) -> Option<Vec<Value>> {
         match reader.read_until(b'\n', &mut line) {
             Ok(0) => break,
             Ok(_) => {}
-            Err(_) => return None,
+            Err(_) => return Err(Unread::Unreadable),
         }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
@@ -505,9 +584,9 @@ fn read_records(path: &Path, out: &mut Collected) -> Option<Vec<Value>> {
         {
             continue;
         }
-        records.push(value);
+        out.records.push(value);
     }
-    Some(records)
+    Ok(out)
 }
 
 /// The role in a subagent's `.meta.json`: `customAgentType` for a teammate,

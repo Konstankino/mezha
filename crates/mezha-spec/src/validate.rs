@@ -188,6 +188,36 @@ fn memory(spec: &Spec, d: &mut Diagnostics) {
             None,
         );
     }
+    let nightly = memory.dream_schedule == crate::model::DreamSchedule::Nightly;
+    let cron = memory.dream_schedule == crate::model::DreamSchedule::Cron;
+    if let Some(at) = &memory.dream_at {
+        if let Err(e) = crate::cron::parse_time(at) {
+            d.error("memory.dream_at", e, None);
+        } else if !nightly {
+            d.warn(
+                "memory.dream_at",
+                "is used only with dream_schedule = \"nightly\"",
+                None,
+            );
+        }
+    }
+    match (&memory.dream_cron, cron) {
+        (Some(expr), _) if crate::cron::check_cron(expr).is_err() => {
+            let e = crate::cron::check_cron(expr).unwrap_err();
+            d.error("memory.dream_cron", e, None);
+        }
+        (Some(_), false) => d.warn(
+            "memory.dream_cron",
+            "is used only with dream_schedule = \"cron\"",
+            None,
+        ),
+        (None, true) => d.error(
+            "memory.dream_schedule",
+            "is \"cron\" but memory.dream_cron is missing",
+            Some(r#"add dream_cron = "15 2 * * 1-5", or use "nightly" with dream_at"#),
+        ),
+        _ => {}
+    }
     if let Some(turns) = memory.dream_max_turns
         && !(1..=DREAM_MAX_TURNS_LIMIT).contains(&turns)
     {

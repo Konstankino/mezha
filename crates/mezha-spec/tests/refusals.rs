@@ -429,3 +429,38 @@ fn has_phi() {
     .unwrap();
     assert!(spec.has_phi());
 }
+
+#[test]
+fn dream_schedules() {
+    let spec = parse(&format!(
+        "{BASE}\n[memory]\ndream_schedule = \"nightly\"\ndream_at = \"02:30\"\n"
+    ))
+    .unwrap();
+    assert!(validate(&spec).0.is_empty(), "{:?}", validate(&spec).0);
+    assert_eq!(spec.memory.dream_at(), (2, 30));
+    assert_eq!(parse(BASE).unwrap().memory.dream_at(), (3, 0));
+    let d = check(&format!(
+        "{BASE}\n[memory]\ndream_schedule = \"cron\"\ndream_cron = \"15 2 * * 1-5\"\n"
+    ));
+    assert!(d.0.is_empty(), "{:?}", d.0);
+
+    only_error(
+        &check(&format!("{BASE}\n[memory]\ndream_schedule = \"cron\"\n")),
+        "memory.dream_schedule",
+    );
+    only_error(
+        &check(&format!(
+            "{BASE}\n[memory]\ndream_schedule = \"cron\"\ndream_cron = \"@daily\"\n"
+        )),
+        "memory.dream_cron",
+    );
+    only_error(
+        &check(&format!(
+            "{BASE}\n[memory]\ndream_schedule = \"nightly\"\ndream_at = \"3am\"\n"
+        )),
+        "memory.dream_at",
+    );
+    let d = check(&format!("{BASE}\n[memory]\ndream_at = \"04:00\"\n"));
+    assert!(!d.has_errors());
+    assert_eq!(paths(&d, Severity::Warning), ["memory.dream_at"]);
+}

@@ -92,6 +92,10 @@ pub struct Memory {
     pub dream_budget_usd: Option<f64>,
     /// The most turns one role's dream may take.
     pub dream_max_turns: Option<u32>,
+    /// `HH:MM` local time for `dream_schedule = "nightly"`.
+    pub dream_at: Option<String>,
+    /// A five-field cron expression for `dream_schedule = "cron"`.
+    pub dream_cron: Option<String>,
 }
 
 pub const DEFAULT_DREAM_MODEL: &str = "sonnet";
@@ -109,6 +113,15 @@ impl Memory {
 
     pub fn dream_max_turns(&self) -> u32 {
         self.dream_max_turns.unwrap_or(DEFAULT_DREAM_MAX_TURNS)
+    }
+
+    /// When a nightly dream runs: `dream_at`, else 03:00. An invalid
+    /// `dream_at` is a validation error, so this falls back quietly.
+    pub fn dream_at(&self) -> (u8, u8) {
+        self.dream_at
+            .as_deref()
+            .and_then(|t| crate::cron::parse_time(t).ok())
+            .unwrap_or((3, 0))
     }
 }
 

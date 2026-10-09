@@ -3,6 +3,7 @@
 //! untrusted, so it goes inside fences, after hard markers and secrets are
 //! redacted, and PHI too when the spec has any.
 
+use crate::markdown::heading_section;
 use crate::scan::{self, Scan};
 use crate::time::format_iso;
 use crate::transcripts::{Run, RunKind};
@@ -10,6 +11,7 @@ use crate::transcripts::{Run, RunKind};
 /// What a digest keeps of each part, in bytes.
 pub const MAX_TASK: usize = 4 * 1024;
 pub const MAX_FINAL: usize = 8 * 1024;
+pub const MAX_SECTION: usize = 4 * 1024;
 pub const MAX_FOLLOWUP: usize = 2 * 1024;
 pub const MAX_FAILURES: usize = 20;
 pub const MAX_FAILURE: usize = 600;
@@ -94,7 +96,7 @@ pub fn digest(run: &Run, phi: bool) -> Digest {
     }
     out.push_str(&format!("- Failed tool calls: {}\n", run.failures.len()));
 
-    section(&mut out, "Task", &clean(&run.task, MAX_TASK));
+    push_section(&mut out, "Task", &clean(&run.task, MAX_TASK));
     if !run.failures.is_empty() {
         out.push_str("\n## Failed tool calls\n");
         for (i, f) in run.failures.iter().take(MAX_FAILURES).enumerate() {
@@ -117,13 +119,21 @@ pub fn digest(run: &Run, phi: bool) -> Digest {
             ));
         }
     }
-    let final_text = clean(&run.final_text, MAX_FINAL);
-    section(&mut out, "Final message", &final_text);
-    if let Some(lessons) = lessons(&final_text) {
-        section(&mut out, "Lessons (from the final message)", &lessons);
+    push_section(
+        &mut out,
+        "Final message",
+        &clean(&run.final_text, MAX_FINAL),
+    );
+    // From the whole message: a long one would lose its closing sections to
+    // the cut above.
+    for name in ["Lessons", "Unresolved"] {
+        if let Some(body) = heading_section(&run.final_text, name) {
+            let title = format!("{name} (from the final message)");
+            push_section(&mut out, &title, &clean(&body, MAX_SECTION));
+        }
     }
     for followup in &run.followups {
-        section(
+        push_section(
             &mut out,
             "Your next message",
             &clean(followup, MAX_FOLLOWUP),
@@ -138,37 +148,7 @@ pub fn digest(run: &Run, phi: bool) -> Digest {
     }
 }
 
-/// The `## Lessons` section of a final message: from that heading (any
-/// level) to the next heading of the same or a higher level.
-pub fn lessons(text: &str) -> Option<String> {
-    let mut lines = text.lines();
-    let mut level = 0;
-    for line in lines.by_ref() {
-        let hashes = line.chars().take_while(|c| *c == '#').count();
-        if (1..=6).contains(&hashes)
-            && line[hashes..]
-                .trim()
-                .trim_end_matches(':')
-                .eq_ignore_ascii_case("lessons")
-        {
-            level = hashes;
-            break;
-        }
-    }
-    if level == 0 {
-        return None;
-    }
-    let body: Vec<&str> = lines
-        .take_while(|line| {
-            let hashes = line.chars().take_while(|c| *c == '#').count();
-            !((1..=level).contains(&hashes) && line[hashes..].starts_with(' '))
-        })
-        .collect();
-    let body = body.join("\n").trim().to_string();
-    (!body.is_empty()).then_some(body)
-}
-
-fn section(out: &mut String, title: &str, body: &str) {
+fn push_section(out: &mut String, title: &str, body: &str) {
     if body.trim().is_empty() {
         return;
     }
@@ -228,18 +208,6 @@ mod tests {
     fn fences_outgrow_backticks() {
         assert_eq!(fenced("a"), "```text\na\n```\n");
         assert_eq!(fenced("x ```` y"), "`````text\nx ```` y\n`````\n");
-    }
-
-    #[test]
-    fn finds_lessons() {
-        let text = "Done.\n\n## Lessons\n\n- run `cargo fmt` first\n\n## Next\nmore";
-        assert_eq!(lessons(text).as_deref(), Some("- run `cargo fmt` first"));
-        assert_eq!(
-            lessons("### lessons:\n- a\n#### detail\n- b").as_deref(),
-            Some("- a\n#### detail\n- b")
-        );
-        assert_eq!(lessons("no heading"), None);
-        assert_eq!(lessons("## Lessons\n\n## Other"), None);
     }
 
     #[test]

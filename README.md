@@ -160,7 +160,10 @@ the command's own output in the tool result, not Claude's summary. Without
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
 | `mezha verify [--json] [--project-only \| --probe \| --inside]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt`, and `--inside` is for Claude to run inside the session's sandbox ([Probing the boundary](#probing-the-boundary)). |
-| `mezha dream [--role R] [--since 7d] [--base REV] [--dry-run]` | Turns recent agent runs into reviewed memory: a commit on a new branch for project memory, a confirmed diff for local and user memory. Refuses inside Claude Code. See [Dreams](#dreams). |
+| `mezha dream [--role R] [--since 7d] [--base REV] [--dry-run \| --scheduled]` | Turns recent agent runs into reviewed memory: a commit on a new branch for project memory, a confirmed diff for local and user memory. Refuses inside Claude Code. See [Dreams](#dreams). |
+| `mezha dream --schedule launchd\|systemd\|cron` | Prints a snippet that runs `mezha dream --scheduled` every night. Installs nothing. See [Scheduling dreams](#scheduling-dreams). |
+| `mezha metrics [--since 30d] [--json] [--record]` | Session cost, rework proxies, unresolved items per week, and whether dreams landed without edits. See [Metrics](#metrics). |
+| `mezha metrics --ab TASKS.toml [--repeat N] [--yes] [--unsandboxed-check]` | Runs each task with the agent's memory and with it emptied, and compares. Spends money; asks first. |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -221,6 +224,12 @@ memory = { scope = "project" }
   `Bash(cargo test *)` gives the agent Bash plus the advisory `agent-bash`
   hook. Leaving `tools` out gives the agent every tool, which compile warns
   about; `tools = []` gives it none.
+- Every agent body ends with a mezha paragraph asking the agent to list
+  what it couldn't finish under `## Unresolved` (in English whatever the
+  answer language); `mezha metrics` counts those per week.
+- Claude Code turns agent memory off together with auto memory:
+  `autoMemoryEnabled = false` or `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` leaves
+  agents without their memory, and verify warns about it.
 - An agent with `memory` reads `.claude/agent-memory/<name>/MEMORY.md` (or
   the local scope for PHI) but can't write it: mezha takes back the Write and
   Edit tools Claude Code would add, and denies the path. Local memory must
@@ -306,6 +315,117 @@ Installed Claude Code mods and plugins still load, and mezha lists them.
 
 The scans are patterns: they reduce PHI and injection risk, they don't
 remove it. Read every dream diff. For PHI, local scope is the boundary.
+
+## Scheduling dreams
+
+Set `dream_schedule = "nightly"` (with `dream_at = "03:00"`, local time) or
+`"cron"` (with `dream_cron = "15 2 * * 1-5"`) in `[memory]`, then print a
+snippet for your scheduler:
+
+```bash
+mezha dream --schedule launchd
+```
+
+- **launchd** (macOS): a LaunchAgent plist and the `launchctl` commands.
+  It runs in your login session, so it uses your keychain login. A dream
+  missed while the Mac slept runs once on wake; nights it was off are
+  skipped.
+- **systemd** (Linux, WSL2): a user service and timer with
+  `Persistent=true`, which catches up after a boot. `loginctl
+  enable-linger` lets it run while you're logged out. Claude Code reads its
+  login from `~/.claude/.credentials.json`.
+- **cron**: one crontab line. It doesn't run missed jobs, and on macOS it
+  may not reach your keychain, so prefer launchd there.
+
+launchd and systemd take `nightly` only; a cron expression needs the cron
+kind. Windows Task Scheduler comes with native Windows in phase 4.
+
+The snippet runs the `mezha` on your PATH directly, not through a shell,
+and refuses one in a directory an agent can write: that would give an agent
+a nightly unsandboxed run. It sets PATH (and `CLAUDE_CONFIG_DIR` if you use
+it), and warns about provider variables set only in your shell, which a
+scheduled run won't have. Move those into the `env` of your user settings.
+For a machine nobody logs in to, `claude setup-token` makes a long-lived
+token; keep `CLAUDE_CODE_OAUTH_TOKEN` in your own secret store, never in a
+snippet or under `~/.mezha`, which sessions can read.
+
+`mezha dream --scheduled`, the mode the snippet runs:
+
+- dreams project memory only; local and user memory need you at a terminal;
+- skips a role whose last dream is still pending (its branch exists and
+  hasn't landed), so branches don't pile up and conflict;
+- stops while a refused dream's worktree is still there, for you to read;
+- doesn't use `awsAuthRefresh` or `gcpAuthRefresh`, which may wait for a
+  browser;
+- records metrics.
+
+Only one dream of a project runs at a time (a `flock` on
+`~/.mezha/dreams/<repo>/dream.lock`, released when the process ends however
+it ends). Every dream writes `last-run.json` next to it. `mezha metrics`
+shows it, and verify's `dreamer` check warns when the last scheduled dream
+failed. Output goes to `schedule.log` in the same directory.
+
+## Metrics
+
+```bash
+mezha metrics --since 30d
+```
+
+It reads the project's transcripts and the store under
+`~/.mezha/metrics/<repo>/`, and changes nothing. `--record` (and every
+dream) adds to the store, which keeps the history after Claude Code
+deletes old transcripts (`cleanupPeriodDays`, 30 by default). The store is
+JSON Lines, one object per line: counts, ids, times, costs and hashes,
+never transcript text.
+
+| Figure | What it is |
+|---|---|
+| Cost | Claude Code's own estimate per session (`cost-state`), minus what a resumed or forked session copied from its parent. A session still running has none yet and isn't averaged. Dreams' cost is separate. |
+| Follow-up prompts per session | Your prompts after the first. A proxy for rework, per session, not per task. |
+| Re-runs | Another run of the same agent in a session after one of your prompts that followed its last run. Parallel runs don't count. |
+| Unresolved per week | Items in agents' last `## Unresolved` section ("None" counts nothing), by ISO week. |
+| Dreams without edits | A dream's memory change (its patch-id, `CHANGELOG.md` left out) landing as is on the base branch's first-parent history: through a merge commit, a rebase or a squash. A landing commit that names the dream's stamp but carries another change is "with edits". A dream whose branch is gone and that hasn't landed is "dropped". The share counts merged dreams. It is as fresh as your last fetch. |
+
+Not measured: returns from human review (it needs PR data; phase 5).
+
+### A/B runs
+
+```bash
+mezha metrics --ab tasks.toml --repeat 3
+```
+
+```toml
+[ab]
+model = "sonnet"          # optional
+budget_usd = 2.0          # per session
+max_turns = 40
+timeout_minutes = 20
+
+[[task]]
+name = "parser-test"
+prompt = "Add a unit test for the parser's error path."
+agent = "implementer"           # a spec agent with project memory, or local non-PHI memory
+check = "cargo test -p parser"  # exit 0 = passed
+```
+
+Each task runs as its agent (`claude -p --agent`) twice per repeat, with the
+order alternating: once in a worktree of the base with the agent memory as
+committed (plus local memory), and once with `.claude/agent-memory`
+removed. Both worktrees get the same neutral commit, sit under the system
+temp directory with neutral names, and run with the project's own
+settings, sandbox and hooks in `acceptEdits`. Sessions can read auto memory
+but not write it: every worktree of a repository shares it, and turning it
+off would turn agent memory off too. User memory, CLAUDE.md and the model
+are the same in both.
+
+A check runs code the agent just wrote, so it runs in srt with the
+project's sandbox settings. `--unsandboxed-check` runs it in your own
+process instead, and the run says so. mezha prints every check and the most
+the run can cost, and asks first (`--yes` skips the question). Results,
+capped diffs and `report.md` go to `~/.mezha/metrics/<repo>/ab-<time>/`.
+Below `--repeat 3` the report claims no difference. The A/B compares memory
+with emptied memory; it doesn't say what mezha costs against Claude Code
+without it.
 
 ## The spec
 
@@ -396,9 +516,26 @@ haiku, step 2b spike):
 - A session started with `--agent X` records
   `{"type":"agent-setting","agentSetting":"X"}`, which the inbox reads.
 
+`crates/mezha-cli/tests/dream.rs` also covers the printed schedules,
+`--scheduled`, the lock, `last-run.json` and `metrics --record`;
+`crates/mezha-cli/tests/ab.rs` runs the A/B runner with stand-in `claude`
+and `srt`, where the check passes only with memory. `real_ab.rs` runs one
+real A/B task against haiku (about $0.04): the agent's memory holds a
+codename the task asks for.
+
+```bash
+MEZHA_REAL_AB=1 cargo test -p mezha --test real_ab -- --ignored --nocapture
+```
+
+Found in step 2c: run as `claude -p --agent X`, an agent gets its memory
+only while auto memory is on. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` or
+`autoMemoryEnabled: false` turn agent memory off too; a deny rule on
+`Edit(~/.claude/projects/**)` keeps auto memory from being written while
+agent memory still loads.
+
 The workspace has eight crates: `mezha-spec`, `mezha-render`, `mezha-hooks`,
-`mezha-broker`, `mezha-verify`, `mezha-memory` and `mezha` (the CLI) do the
-work; `mezha-metrics` is a placeholder for step 2c. The boundary scenarios
+`mezha-broker`, `mezha-verify`, `mezha-memory`, `mezha-metrics` and `mezha`
+(the CLI). The boundary scenarios
 verify must fail on live in `crates/mezha-verify/tests/boundary.rs`.
 
 ## Documents
@@ -412,5 +549,7 @@ verify must fail on live in `crates/mezha-verify/tests/boundary.rs`.
   `mezha verify` checks.
 - [ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md): agent
   memory changes only through reviewed dreams.
+- [ADR-0005](docs/adr/0005-metrics-ab-and-scheduled-dreams.md): metrics, A/B
+  runs and scheduled dreams.
 - [Porting inventory](docs/porting-inventory.md): what comes from ocgen, and
   what doesn't.

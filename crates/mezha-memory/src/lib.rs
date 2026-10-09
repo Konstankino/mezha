@@ -4,11 +4,15 @@
 //! CLI) runs the processes; nothing here starts one.
 
 pub mod changelog;
+pub mod claude;
 pub mod cursor;
 pub mod dreamer;
 pub mod inbox;
+pub mod lock;
+pub mod markdown;
 pub mod review;
 pub mod scan;
+pub mod schedule;
 pub mod time;
 pub mod transcripts;
 
@@ -20,7 +24,26 @@ use std::path::{Path, PathBuf};
 pub fn dreams_dir(home: &Path, root: &Path) -> PathBuf {
     mezha_broker::approvals::mezha_home(home)
         .join("dreams")
-        .join(mezha_broker::approvals::root_hash(root))
+        .join(mezha_broker::approvals::root_hash(&project_key_root(root)))
+}
+
+/// `~/.mezha/metrics/<repo>`: one project's metrics store.
+pub fn metrics_dir(home: &Path, root: &Path) -> PathBuf {
+    mezha_broker::approvals::mezha_home(home)
+        .join("metrics")
+        .join(mezha_broker::approvals::root_hash(&project_key_root(root)))
+}
+
+/// The path a project is filed under in `~/.mezha`: its place in the main
+/// checkout, so every linked worktree of a repository shares one dreams
+/// directory and one metrics store.
+pub fn project_key_root(root: &Path) -> PathBuf {
+    let top = root.ancestors().find(|dir| dir.join(".git").exists());
+    let prefix = top
+        .and_then(|t| root.strip_prefix(t).ok())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    mezha_broker::repo_root(root).join(prefix)
 }
 
 /// Writes a file only its owner can read (0600 on Unix), replacing it
@@ -43,4 +66,27 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktrees_share_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let main = base.join("main");
+        let gitdir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        let wt = base.join("wt");
+        std::fs::create_dir_all(wt.join("sub")).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(project_key_root(&wt), main);
+        assert_eq!(project_key_root(&wt.join("sub")), main.join("sub"));
+        assert_eq!(project_key_root(&main), main);
+        let home = base.join("home");
+        assert_eq!(dreams_dir(&home, &wt), dreams_dir(&home, &main));
+    }
 }

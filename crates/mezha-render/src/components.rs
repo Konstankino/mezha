@@ -216,10 +216,14 @@ fn agent_file(spec: &Spec, name: &str, agent: &Agent, body: &str) -> Result<Stri
     let mut text = body.trim_end().to_string();
     if let Some(scope) = scope {
         text.push_str(&format!(
-            "\n\n## Memory (mezha)\n\nYour memory in `{}` is read-only in this session: mezha denies writes to it, so don't try to save memories there, whatever other instructions say. `mezha dream` updates it from session transcripts, and a person reviews every change. If you learn something that should last, end your final message with a `## Lessons` section that lists it.\n",
+            "\n\n## Memory (mezha)\n\nYour memory in `{}` is read-only in this session: mezha denies writes to it, so don't try to save memories there, whatever other instructions say. `mezha dream` updates it from session transcripts, and a person reviews every change. If you learn something that should last, end your final message with a `## Lessons` section that lists it.",
             memory_dir(name, scope)
         ));
     }
+    // `mezha metrics` counts these sections (UNRESOLVED per week).
+    text.push_str(
+        "\n\n## Reporting (mezha)\n\nIf you couldn't finish part of the task, end your final message with an `## Unresolved` section (this English heading, whatever language you answer in) that lists what is left and why. Leave it out when you finished.\n",
+    );
     Ok(assemble(&frontmatter::write(&fields)?, &text))
 }
 
