@@ -15,6 +15,7 @@ pub const VERSION: u64 = 1;
 pub const SESSIONS: &str = "sessions.jsonl";
 pub const DREAMS: &str = "dreams.jsonl";
 pub const AB: &str = "ab.jsonl";
+pub const SKILL_EVALS: &str = "skill-evals.jsonl";
 const LOCK: &str = "store.lock";
 
 pub struct Store {

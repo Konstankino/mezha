@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::ab::{self, AbRow};
 use crate::dreams::{DreamRow, DreamTally, Status};
 use crate::sessions::SessionRow;
+use crate::skill_eval::{self, EvalRow};
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RoleStats {
@@ -44,6 +45,8 @@ pub struct Report {
     pub share_without_edits: Option<f64>,
     pub last_dream: Option<Value>,
     pub ab: Option<ab::Summary>,
+    /// The latest eval of each skill.
+    pub skill_evals: Vec<skill_eval::Summary>,
     pub not_measured: Vec<&'static str>,
 }
 
@@ -53,6 +56,7 @@ pub fn build(
     sessions: &[SessionRow],
     dreams: &[(DreamRow, Option<Status>)],
     ab_rows: &[AbRow],
+    eval_rows: &[EvalRow],
     last_dream: Option<Value>,
 ) -> Report {
     let window: Vec<&SessionRow> = sessions.iter().filter(|s| s.end >= since).collect();
@@ -92,6 +96,24 @@ pub fn build(
             .collect();
         ab::summarize(&rows)
     });
+    let mut latest: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in eval_rows {
+        let stamp = latest.entry(&row.skill).or_insert(&row.stamp);
+        if row.stamp.as_str() > *stamp {
+            *stamp = &row.stamp;
+        }
+    }
+    let skill_evals = latest
+        .into_iter()
+        .map(|(skill, stamp)| {
+            let rows: Vec<EvalRow> = eval_rows
+                .iter()
+                .filter(|r| r.skill == skill && r.stamp == stamp)
+                .cloned()
+                .collect();
+            skill_eval::summarize(&rows)
+        })
+        .collect();
     let n = window.len();
     Report {
         version: 1,
@@ -111,6 +133,7 @@ pub fn build(
         dreams: tally,
         last_dream,
         ab,
+        skill_evals,
         not_measured: vec![
             "returns from human review (needs PR data; phase 5)",
             "cost against bare Claude Code (the A/B compares memory with emptied memory)",
@@ -236,6 +259,36 @@ impl Report {
                 if ab.too_few { " (too few runs to claim a difference)" } else { "" }
             ));
         }
+        for s in &self.skill_evals {
+            let mut parts = Vec::new();
+            if !s.triggers.is_empty() {
+                parts.push(format!(
+                    "triggers precision {}, recall {}",
+                    skill_eval::percent(s.precision),
+                    skill_eval::percent(s.recall)
+                ));
+            }
+            if !s.tasks.is_empty() {
+                parts.push(format!(
+                    "tasks with the skill {}/{} passed, without {}/{}{}",
+                    s.with.passed,
+                    s.with.runs,
+                    s.without.passed,
+                    s.without.runs,
+                    if s.too_few {
+                        " (too few runs to claim a difference)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            out.push_str(&format!(
+                "Skill eval  {}, {}: {}\n",
+                s.skill,
+                s.stamp,
+                parts.join(" · ")
+            ));
+        }
         out.push_str(&format!("Not measured: {}\n", self.not_measured.join("; ")));
         out
     }
@@ -317,7 +370,7 @@ mod tests {
             session("s2", day + 60, None, 1, vec![]),
             session("old", 10, Some(100.0), 1, vec![]),
         ];
-        let r = build("p", day - 86_400, &sessions, &[], &[], None);
+        let r = build("p", day - 86_400, &sessions, &[], &[], &[], None);
         assert_eq!((r.sessions, r.sessions_with_cost), (2, 1));
         assert_eq!(r.cost_per_session_usd, Some(2.0));
         assert_eq!(r.followups_per_session, Some(1.0));

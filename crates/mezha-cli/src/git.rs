@@ -53,7 +53,7 @@ pub fn resolve_base(git: &Git, root: &Path, base: Option<&str>) -> Result<(Strin
         .out(root, &["symbolic-ref", "--short", "--quiet", "HEAD"])
         .map(|n| n.trim().to_string())
         .unwrap_or_else(|_| "HEAD".into());
-    eprintln!("note: no origin/HEAD, so the dream starts from {name}; pass --base to choose");
+    eprintln!("note: no origin/HEAD, so mezha starts from {name}");
     Ok((sha.trim().to_string(), name))
 }
 

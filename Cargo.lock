@@ -394,6 +394,7 @@ version = "0.0.1"
 dependencies = [
  "mezha-memory",
  "mezha-spec",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

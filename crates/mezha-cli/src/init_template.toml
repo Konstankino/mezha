@@ -46,6 +46,8 @@ deny_reads = [".env", "*.pem", "*.key"]
 # preset = "knowledge"
 # description = "Error handling and test conventions for this workspace. Use when writing Rust code."
 # paths = ["**/*.rs"]
+# (`mezha skill eval rust-conventions` checks when Claude loads it and what
+#  it changes, from cases in mezha/evals/rust-conventions.toml)
 #
 # [rule.terraform]
 # paths = ["infra/**/*.tf"]

@@ -13,6 +13,7 @@ use mezha_memory::transcripts;
 use mezha_metrics::ab::AbRow;
 use mezha_metrics::dreams::{self, BaseChange, DreamRow, Status};
 use mezha_metrics::sessions::{self, SessionRow};
+use mezha_metrics::skill_eval::EvalRow;
 use mezha_metrics::store::{self, Store};
 use mezha_spec::Spec;
 use mezha_verify::Ctx;
@@ -209,12 +210,19 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         .into_iter()
         .filter_map(|v| serde_json::from_value(v).ok())
         .collect();
+    let eval_rows: Vec<EvalRow> = project
+        .store
+        .read(store::SKILL_EVALS, "id")
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
     let report = mezha_metrics::report::build(
         &spec.project.name,
         since,
         &sessions,
         &dreams,
         &ab_rows,
+        &eval_rows,
         last,
     );
     if opts.json {

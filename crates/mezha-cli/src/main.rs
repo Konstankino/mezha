@@ -2,11 +2,13 @@
 
 mod ab;
 mod approve;
+mod bench;
 mod dream;
 mod files;
 mod git;
 mod metrics;
 mod schedule;
+mod skill_eval;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -126,6 +128,11 @@ enum Command {
         #[arg(long, requires = "ab")]
         unsandboxed_check: bool,
     },
+    /// Work with the spec's skills.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
     /// Check that the boundary holds: the sandbox is in effect, an agent
     /// can't push, and nothing switched the gate off. Exit 0 = pass (maybe
     /// with warnings), 1 = a check failed, 2 = verify couldn't run.
@@ -150,6 +157,38 @@ enum Command {
     Hook {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Check that Claude loads a skill when it should and only then, and
+    /// compare tasks with the skill and without it. Spends money; asks
+    /// first. Run it in your own terminal.
+    Eval {
+        /// The skill, as named in mezha.toml.
+        name: String,
+        /// The case file. Default: mezha/evals/<NAME>.toml.
+        #[arg(long, value_name = "FILE")]
+        cases: Option<PathBuf>,
+        /// How many times to run each trigger prompt, and each task with
+        /// the skill and without it.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=20))]
+        repeat: u32,
+        /// The commit the runs start from. Default: origin/HEAD, else HEAD.
+        /// The skill itself always comes from mezha.toml as it is now.
+        #[arg(long)]
+        base: Option<String>,
+        /// Run only the trigger prompts, or only the tasks.
+        #[arg(long, value_enum)]
+        only: Option<skill_eval::Only>,
+        /// Don't ask before spending.
+        #[arg(long)]
+        yes: bool,
+        /// Run checks in your own process instead of in srt. They run code
+        /// the agent just wrote.
+        #[arg(long)]
+        unsandboxed_check: bool,
     },
 }
 
@@ -259,6 +298,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 record,
                 ab,
                 repeat,
+                yes,
+                unsandboxed_check,
+            },
+        ),
+        Command::Skill {
+            command:
+                SkillCommand::Eval {
+                    name,
+                    cases,
+                    repeat,
+                    base,
+                    only,
+                    yes,
+                    unsandboxed_check,
+                },
+        } => skill_eval::run(
+            &root,
+            &skill_eval::Options {
+                name,
+                cases,
+                repeat,
+                base,
+                only,
                 yes,
                 unsandboxed_check,
             },

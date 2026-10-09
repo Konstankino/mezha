@@ -10,7 +10,7 @@ give the tool its name:
 2. An agent's knowledge is what survives **past the session's boundary**
    (skills, rules, memory a human has reviewed).
 
-Status: **pre-alpha**, phase 2 of [`mezha-plan.md`](mezha-plan.md).
+Status: **pre-alpha**, phase 3 of [`mezha-plan.md`](mezha-plan.md).
 Nothing is published yet.
 
 ## What is a boundary and what is advisory
@@ -164,6 +164,7 @@ the command's own output in the tool result, not Claude's summary. Without
 | `mezha dream --schedule launchd\|systemd\|cron` | Prints a snippet that runs `mezha dream --scheduled` every night. Installs nothing. See [Scheduling dreams](#scheduling-dreams). |
 | `mezha metrics [--since 30d] [--json] [--record]` | Session cost, rework proxies, unresolved items per week, and whether dreams landed without edits. See [Metrics](#metrics). |
 | `mezha metrics --ab TASKS.toml [--repeat N] [--yes] [--unsandboxed-check]` | Runs each task with the agent's memory and with it emptied, and compares. Spends money; asks first. |
+| `mezha skill eval NAME [--cases FILE] [--repeat N] [--only triggers\|tasks] [--base REV] [--yes] [--unsandboxed-check]` | Checks that Claude loads the skill when it should and only then, and compares tasks with it and without it. Spends money; asks first. See [Skill evals](#skill-evals). |
 | `mezha approve [--minutes N \| --status \| --revoke]` | Grants gated commands for 1 to 1440 minutes. Refuses inside Claude Code and without a terminal. |
 | `mezha hook <name>` | Run by Claude Code; see `.claude/settings.json`. |
 
@@ -427,6 +428,80 @@ Below `--repeat 3` the report claims no difference. The A/B compares memory
 with emptied memory; it doesn't say what mezha costs against Claude Code
 without it.
 
+## Skill evals
+
+```bash
+mezha skill eval rust-conventions --repeat 3
+```
+
+It reads the skill's cases from `mezha/evals/<skill>.toml` (or `--cases
+FILE`). `mezha/` is behind an ask rule and the sandbox, so an agent can't
+quietly rewrite them.
+
+```toml
+[eval]
+model = "sonnet"       # optional
+budget_usd = 1.0       # per session
+max_turns = 30         # per task session
+trigger_turns = 4      # turns a trigger run gets to load the skill
+timeout_minutes = 15
+
+[[trigger]]
+prompt = "Add a timeout variant to the parser's error type."
+should_trigger = true
+
+[[trigger]]
+prompt = "Summarise the README."
+should_trigger = false
+
+[[task]]
+name = "timeout-error"
+prompt = "Add a Timeout error to src/error.rs, with a test."
+check = "cargo test -q"        # exit 0 = passed
+expect = ["(?i)timeout"]       # the final message matches each
+reject = ['unwrap\(\)']        # and none of these
+```
+
+- **Triggers** run with the skill only. A run loaded the skill when, within
+  `trigger_turns`, Claude called the Skill tool for it or read its
+  `SKILL.md`, and the call succeeded. The report gives precision (loads
+  that were wanted) and recall (wanted loads that happened), against the
+  80% precision target in section 7 of the plan. List prompts of both kinds.
+- **Tasks** run with the skill and without it, the order alternating, as
+  in A/B runs. A task passes when its check passes and its patterns hold;
+  with neither, when the session succeeds. The report says how often the
+  skill really loaded in runs that had it: a run that didn't load it says
+  nothing about its content.
+- The skill comes from `mezha.toml` and its body file as they are now,
+  without `mezha compile`; the rest of the project from `origin/HEAD`, else
+  `HEAD`, or `--base`. Without the skill, its directory and body file are
+  gone. In both, the case files are gone and the same neutral commit is on
+  top.
+- Every run is a fresh clone of the repository (`git clone --shared`, its
+  remote removed), not a worktree: in a linked worktree Claude Code reads
+  the project's skills from the main checkout, so a skill removed from the
+  worktree still loads. The clone, and the directory Claude Code makes for
+  it under `~/.claude/projects`, are removed after the run; its commits
+  never reach your repository.
+- Sessions run as in A/B runs: the project's settings, sandbox and hooks,
+  acceptEdits, checks in srt unless `--unsandboxed-check`. Your own skills
+  and plugins load in both variants and compete for the trigger, so a
+  colleague's numbers may differ. The project's auto memory doesn't load:
+  each clone has its own, empty one.
+- Command skills are refused, since Claude never loads them on its own. If
+  a skill with the same name loads in a run without the project's, the eval
+  stops: a user or plugin skill shares its name.
+- `--only triggers` or `--only tasks` runs one kind, for instance while you
+  work on a description.
+
+mezha prints the most the eval can cost and asks first (`--yes` skips the
+question). Rows go to `skill-evals.jsonl` in the metrics store (counts and
+a hash of each prompt, never its text); the report and each task's final
+message and diff go to `~/.mezha/metrics/<repo>/skill-<skill>-<time>/`.
+`mezha metrics` shows the latest eval of each skill. Below `--repeat 3` the
+report claims no difference between the variants. See
+[ADR-0006](docs/adr/0006-skill-eval-own-runner-in-clones.md).
+
 ## The spec
 
 `mezha.toml` follows section 4 of the plan. Unknown keys are errors. The
@@ -527,6 +602,35 @@ codename the task asks for.
 MEZHA_REAL_AB=1 cargo test -p mezha --test real_ab -- --ignored --nocapture
 ```
 
+`crates/mezha-cli/tests/skill_eval.rs` runs `mezha skill eval` with stand-in
+`claude` and `srt`. The stand-in loads the skill only when its `SKILL.md` is
+in the clone, and knows the codename only from it, so every trigger comes
+out right and the task passes only with the skill. `real_skill_eval.rs` runs
+one real eval against haiku (about $0.17): a skill holds a codename, two
+prompts should load it and two shouldn't, and the task asks for the
+codename.
+
+```bash
+MEZHA_REAL_SKILL_EVAL=1 cargo test -p mezha --test real_skill_eval -- --ignored --nocapture
+```
+
+Found in step 3a (Claude Code 2.1.285, haiku):
+
+- In a linked git worktree, project skills load from the main checkout
+  ("Base directory for this skill: <main checkout>/.claude/skills/..."),
+  while agent memory loads from the worktree. Skill evals run in clones;
+  the A/B runner's emptied memory is unaffected.
+- The `skills` and `slash_commands` lists in `system/init` leave out skills
+  with `user-invocable: false`, mezha's default for knowledge skills;
+  Claude still loads them with the Skill tool. A skill with `paths` is
+  listed (a `commands_changed` event) only after the session reads a
+  matching file.
+- Headless, in acceptEdits with `--permission-prompts none`, the Skill tool
+  runs without a denial. A missing skill fails with `is_error: true`
+  ("Unknown skill"), and so does a Read of a missing file.
+- haiku sometimes reads a skill's `SKILL.md` with Read instead of calling
+  the Skill tool.
+
 Found in step 2c: run as `claude -p --agent X`, an agent gets its memory
 only while auto memory is on. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` or
 `autoMemoryEnabled: false` turn agent memory off too; a deny rule on
@@ -551,5 +655,7 @@ verify must fail on live in `crates/mezha-verify/tests/boundary.rs`.
   memory changes only through reviewed dreams.
 - [ADR-0005](docs/adr/0005-metrics-ab-and-scheduled-dreams.md): metrics, A/B
   runs and scheduled dreams.
+- [ADR-0006](docs/adr/0006-skill-eval-own-runner-in-clones.md): skill evals,
+  a runner of mezha's own in clones of the project.
 - [Porting inventory](docs/porting-inventory.md): what comes from ocgen, and
   what doesn't.
