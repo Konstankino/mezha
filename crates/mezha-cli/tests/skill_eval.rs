@@ -402,6 +402,17 @@ fn refusals() {
         stderr(&out)
     );
 
+    // A relative --cases is from the current directory, not the project,
+    // and the error names the file in full.
+    let out = s.eval("ok", &["conventions", "--yes", "--cases", "nowhere.toml"]);
+    assert_eq!(out.status.code(), Some(1));
+    let missing = s.p.root.join("nowhere.toml");
+    assert!(
+        stderr(&out).contains(&format!("error: {} (write", missing.display())),
+        "{}",
+        stderr(&out)
+    );
+
     // Only one kind of trigger.
     let cases = s.p.base.join("one-sided.toml");
     write(

@@ -3,6 +3,7 @@
 //! worktrees, and a sandboxed check says which runs passed. It spends real
 //! money, so it says how much at most and asks first.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use mezha_memory::review;
 use mezha_memory::scan::escape;
 use mezha_metrics::ab::{self, AbRow, Task, TaskFile, Variant};
 use mezha_metrics::store::{self, Store};
+use mezha_render::components::memory_dir;
 use mezha_spec::{Scope, Spec};
 use mezha_verify::Ctx;
 use mezha_verify::scratch::Scratch;
@@ -41,8 +43,11 @@ pub fn run(root: &Path, tasks_path: &Path, opts: &Options) -> Result<ExitCode> {
     let Some((spec, _)) = super::load(&root)? else {
         return Ok(ExitCode::FAILURE);
     };
+    // A relative path is from the current directory, not the project: say
+    // which file that was.
+    let tasks_path = std::path::absolute(tasks_path).unwrap_or_else(|_| tasks_path.to_path_buf());
     let text =
-        std::fs::read_to_string(tasks_path).with_context(|| tasks_path.display().to_string())?;
+        std::fs::read_to_string(&tasks_path).with_context(|| tasks_path.display().to_string())?;
     let file = ab::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", tasks_path.display()))?;
     let errors = ab::validate(&file, &spec);
     if !errors.is_empty() {
@@ -57,6 +62,18 @@ pub fn run(root: &Path, tasks_path: &Path, opts: &Options) -> Result<ExitCode> {
     let layers = mezha_verify::layers::Layers::load(&ctx, false);
     ctx.agent_writable = layers.agent_writable(&ctx);
     let git = Git::new(&ctx)?;
+    let (base, base_name) = resolve_base(&git, &root, None)?;
+    let prefix = git
+        .out(&root, &["rev-parse", "--show-prefix"])?
+        .trim()
+        .to_string();
+    let problems = base_problems(&git, &root, &spec, &file, &base, &base_name, &prefix)?;
+    if !problems.is_empty() {
+        for p in &problems {
+            eprintln!("error: {p}");
+        }
+        return Ok(ExitCode::FAILURE);
+    }
     let (claude, version) = bench::find_claude(&ctx)?;
     let checks: Vec<&Task> = file.task.iter().filter(|t| t.check.is_some()).collect();
     let srt = bench::find_srt(&ctx, !checks.is_empty(), opts.unsandboxed_check)?;
@@ -85,11 +102,6 @@ pub fn run(root: &Path, tasks_path: &Path, opts: &Options) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
 
-    let (base, base_name) = resolve_base(&git, &root, None)?;
-    let prefix = git
-        .out(&root, &["rev-parse", "--show-prefix"])?
-        .trim()
-        .to_string();
     let home = ctx.home.clone().context("can't find the home directory")?;
     let stamp = mezha_render::utc_stamp(super::now());
     let report = mezha_memory::metrics_dir(&home, &root).join(format!("ab-{stamp}"));
@@ -165,6 +177,69 @@ pub fn run(root: &Path, tasks_path: &Path, opts: &Options) -> Result<ExitCode> {
     )?;
     println!("\n{markdown}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Why runs from `base` couldn't show what memory changes, before anything
+/// is spent: each task's agent must be committed there, and have memory
+/// for the emptied variant to lack.
+fn base_problems(
+    git: &Git,
+    root: &Path,
+    spec: &Spec,
+    file: &TaskFile,
+    base: &str,
+    base_name: &str,
+    prefix: &str,
+) -> Result<Vec<String>> {
+    let agents: BTreeSet<&str> = file.task.iter().map(|t| t.agent.as_str()).collect();
+    let mut problems = Vec::new();
+    for name in agents {
+        let agent_file = format!("{prefix}.claude/agents/{name}.md");
+        if git
+            .out(root, &["cat-file", "-e", &format!("{base}:{agent_file}")])
+            .is_err()
+        {
+            problems.push(format!(
+                "{agent_file} isn't in {base_name}: run `mezha compile` and commit .claude/"
+            ));
+        }
+        let Some(agent) = spec.agent.get(name) else {
+            continue;
+        };
+        let has_memory = match spec.memory_scope(agent) {
+            Some(Scope::Project) => {
+                let dir = format!("{prefix}{}", memory_dir(name, Scope::Project));
+                let listed = git.out(
+                    root,
+                    &[
+                        "ls-tree",
+                        "-r",
+                        "--full-tree",
+                        "--name-only",
+                        base,
+                        "--",
+                        &dir,
+                    ],
+                )?;
+                !listed.trim().is_empty()
+            }
+            Some(Scope::Local) => {
+                let dir = root.join(memory_dir(name, Scope::Local));
+                !review::snapshot(&dir)
+                    .map_err(anyhow::Error::msg)?
+                    .is_empty()
+            }
+            // The task file's validation refused these.
+            Some(Scope::User) | None => continue,
+        };
+        if !has_memory {
+            problems.push(format!(
+                "agent.{name} has no memory in {base_name}, so both variants would be the same: \
+                 run `mezha dream --role {name}` and merge its branch first"
+            ));
+        }
+    }
+    Ok(problems)
 }
 
 impl Setup<'_> {

@@ -419,6 +419,13 @@ but not write it: every worktree of a repository shares it, and turning it
 off would turn agent memory off too. User memory, CLAUDE.md and the model
 are the same in both.
 
+The tasks file's path is from the current directory, not the project. The
+base (`origin/HEAD`, else `HEAD`) must hold each task's agent file and,
+for project memory, some committed memory; local memory must not be empty.
+Without the agent file Claude Code doesn't know the agent, and without
+memory both variants run the same, so mezha refuses before asking about
+money: run `mezha compile`, commit `.claude/`, and merge a dream first.
+
 A check runs code the agent just wrote, so it runs in srt with the
 project's sandbox settings. `--unsandboxed-check` runs it in your own
 process instead, and the run says so. mezha prints every check and the most

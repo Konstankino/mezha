@@ -70,8 +70,10 @@ pub fn run(root: &Path, opts: &Options) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     };
     let name = opts.name.as_str();
+    // A relative --cases is from the current directory, not the project: say
+    // which file that was.
     let cases = match &opts.cases {
-        Some(path) => path.clone(),
+        Some(path) => std::path::absolute(path).unwrap_or_else(|_| path.clone()),
         None => root.join(EVALS_DIR).join(format!("{name}.toml")),
     };
     let text = std::fs::read_to_string(&cases).with_context(|| {

@@ -107,6 +107,10 @@ fn setup() -> Setup {
         &p.root.join(".claude/agent-memory/implementer/MEMORY.md"),
         "- run tests first\n",
     );
+    write(
+        &p.root.join(".claude/agents/implementer.md"),
+        "---\nname: \"implementer\"\n---\n\nImplement.\n",
+    );
     write(&p.root.join("src/lib.rs"), "// code\n");
     git(&p.root, &p.home, &["add", "-A"]);
     git(&p.root, &p.home, &["commit", "-q", "-m", "init"]);
@@ -253,4 +257,57 @@ fn refusals() {
     let out = s.ab("ok", &["--yes", "--unsandboxed-check"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("(UNSANDBOXED)"));
+}
+
+/// Refused before claude is even looked for: a tasks file that isn't there,
+/// named in full, and a base whose runs couldn't differ.
+#[test]
+fn refuses_runs_that_cant_differ() {
+    let s = setup();
+    // A relative path is from the current directory, not the project.
+    let out =
+        s.p.mezha(&["metrics", "--ab", "nowhere/tasks.toml", "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    let missing = s.p.root.join("nowhere/tasks.toml");
+    assert!(
+        stderr(&out).contains(&format!("error: {}:", missing.display())),
+        "{}",
+        stderr(&out)
+    );
+
+    // Without memory in the base, both variants would be the same.
+    git(
+        &s.p.root,
+        &s.p.home,
+        &["rm", "-q", "-r", ".claude/agent-memory"],
+    );
+    git(&s.p.root, &s.p.home, &["commit", "-q", "-m", "forget"]);
+    let out = s.ab("ok", &["--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("agent.implementer has no memory in main"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stdout(&out).contains("at most $"), "{}", stdout(&out));
+
+    // Without the agent, Claude Code wouldn't know it.
+    git(
+        &s.p.root,
+        &s.p.home,
+        &["rm", "-q", ".claude/agents/implementer.md"],
+    );
+    git(
+        &s.p.root,
+        &s.p.home,
+        &["commit", "-q", "-m", "drop the agent"],
+    );
+    let out = s.ab("ok", &["--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains(".claude/agents/implementer.md isn't in main"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.log.exists(), "nothing ran");
 }
