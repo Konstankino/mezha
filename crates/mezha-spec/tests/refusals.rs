@@ -40,14 +40,45 @@ permissions_ask = ["git push"]
 const AGENT: &str = "description = \"A test agent.\"\ntools = [\"Read\"]\n";
 
 #[test]
-fn plan_example_builds_with_one_warning() {
+fn plan_example_builds_cleanly() {
     let spec = load("plan-example.toml");
     let d = validate(&spec);
-    assert!(!d.has_errors(), "{:#?}", d.0);
-    let warnings: Vec<_> = d.warnings().collect();
-    assert_eq!(warnings.len(), 1, "{warnings:#?}");
-    assert_eq!(warnings[0].path, "agent.implementer.skills");
-    assert!(warnings[0].message.contains("db-migrations"));
+    assert!(d.0.is_empty(), "{:#?}", d.0);
+}
+
+#[test]
+fn preloaded_skills_must_be_reviewed() {
+    // OWASP AST09: an agent preloads only skills someone has looked at.
+    let agent =
+        format!("{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nskills = [\"db-migrations\"]\n");
+    let d = check(&agent);
+    let e = only_error(&d, "agent.a.skills");
+    assert!(e.message.contains("db-migrations"), "{e:?}");
+    assert!(
+        e.hint
+            .as_deref()
+            .unwrap()
+            .contains("policy.external_skills")
+    );
+
+    let listed = agent.replace(
+        "permissions_ask = [\"git push\"]",
+        "permissions_ask = [\"git push\"]\nexternal_skills = [\"db-migrations\", \"tools:lint\"]",
+    );
+    assert!(check(&listed).0.is_empty(), "{:#?}", check(&listed).0);
+
+    let bad = agent.replace(
+        "permissions_ask = [\"git push\"]",
+        "permissions_ask = [\"git push\"]\nexternal_skills = [\"db migrations\", \"a:b:c\"]",
+    );
+    assert_eq!(
+        paths(&check(&bad), Severity::Error),
+        [
+            "policy.external_skills[0]",
+            "policy.external_skills[1]",
+            "agent.a.skills"
+        ]
+    );
 }
 
 #[test]

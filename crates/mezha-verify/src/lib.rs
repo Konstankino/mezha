@@ -130,6 +130,9 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         None,
         &rendered.files,
     );
+    if !opts.project_only {
+        found.walk_outside(ctx, &layers);
+    }
 
     let checks = vec![
         sandbox.check,
@@ -141,6 +144,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         protection,
         checks::dreamer::check(ctx, &spec, opts),
         checks::bodies::check(&found),
+        checks::inventory::check(&found, &spec),
         checks::plugin::check(ctx, opts),
     ];
     let mut notes = Vec::new();

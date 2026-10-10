@@ -6,11 +6,15 @@
 //! clean.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mezha_memory::scan::{self, EXTERNAL_REFERENCE, Level, UNSCANNED};
 use mezha_render::state::fingerprint;
 use serde::Serialize;
+use serde_json::Value;
+
+use crate::ctx::Ctx;
+use crate::layers::Layers;
 
 /// The walk stops after this many files, and says so.
 pub const MAX_FILES: usize = 2000;
@@ -87,9 +91,41 @@ pub struct Inventory {
     pub items: Vec<Item>,
     /// The walk hit [`MAX_FILES`] before it finished.
     pub truncated: bool,
+    /// Enabled plugins verify couldn't find on disk, as `name@marketplace`.
+    pub missing_plugins: Vec<String>,
 }
 
 impl Inventory {
+    /// Adds what loads from outside the repository: the user's own agents,
+    /// skills, rules and commands, and those of every enabled plugin.
+    pub fn walk_outside(&mut self, ctx: &Ctx, layers: &Layers) {
+        let none = BTreeMap::new();
+        let (config, shown) = match ctx.var("CLAUDE_CONFIG_DIR") {
+            Some(dir) => (PathBuf::from(dir), dir.trim_end_matches('/').to_string()),
+            None => match &ctx.home {
+                Some(home) => (home.join(".claude"), "~/.claude".to_string()),
+                None => return,
+            },
+        };
+        let project = std::fs::canonicalize(ctx.root.join(".claude")).ok();
+        if std::fs::canonicalize(&config).ok() != project || project.is_none() {
+            self.walk(&config, &shown, Source::User, None, &none);
+        }
+        let plugins = ctx
+            .var("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config.join("plugins"));
+        for id in enabled_plugins(layers) {
+            match plugin_dir(&plugins, &id) {
+                Some(dir) => {
+                    let shown = format!("plugin:{id}");
+                    self.walk(&dir, &shown, Source::Plugin, Some(&id), &none);
+                }
+                None => self.missing_plugins.push(id),
+            }
+        }
+    }
+
     /// Adds the agents, skills, rules and commands under `base` (a `.claude`
     /// directory, or a plugin's root), shown as `shown/...`. `managed` holds
     /// the files mezha generates, by path under the project.
@@ -265,6 +301,58 @@ fn scan_file(path: &Path, item: &mut Item) {
             Level::Phrase => item.phrases.push(at),
         }
     }
+}
+
+/// Plugins `enabledPlugins` turns on, as `name@marketplace`: for each key,
+/// the most specific settings file that names it decides.
+pub fn enabled_plugins(layers: &Layers) -> Vec<String> {
+    let mut state: BTreeMap<String, bool> = BTreeMap::new();
+    for (value, _) in layers.every("/enabledPlugins") {
+        for (id, on) in value.as_object().into_iter().flatten() {
+            state.insert(id.clone(), on.as_bool() == Some(true));
+        }
+    }
+    state
+        .into_iter()
+        .filter_map(|(id, on)| on.then_some(id))
+        .collect()
+}
+
+/// Where Claude Code keeps an installed plugin: the `installPath` that
+/// `installed_plugins.json` records for it, or else the newest version
+/// under `cache/<marketplace>/<plugin>/`.
+fn plugin_dir(plugins: &Path, id: &str) -> Option<PathBuf> {
+    let recorded = std::fs::read_to_string(plugins.join("installed_plugins.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            let entry = v
+                .pointer("/plugins")
+                .and_then(|p| p.get(id))
+                .or_else(|| v.get(id))?
+                .clone();
+            let entries = match entry {
+                Value::Array(list) => list,
+                other => vec![other],
+            };
+            entries
+                .iter()
+                .rev()
+                .find_map(|e| e.get("installPath")?.as_str().map(PathBuf::from))
+        });
+    if let Some(dir) = recorded.filter(|d| d.is_dir()) {
+        return Some(dir);
+    }
+    let (name, marketplace) = id.split_once('@')?;
+    let mut versions: Vec<PathBuf> =
+        std::fs::read_dir(plugins.join("cache").join(marketplace).join(name))
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+    versions.sort();
+    versions.pop()
 }
 
 fn rel_path(base: &Path, path: &Path) -> Option<String> {

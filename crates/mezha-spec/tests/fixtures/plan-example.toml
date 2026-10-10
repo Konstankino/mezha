@@ -9,6 +9,7 @@ sandbox = true
 egress_allow = ["github.com", "crates.io", "pypi.org"]
 permissions_ask = ["git push", "terraform apply", "docker push"]
 deny_reads = [".env", "*.pem", "*.key", "*.tfstate"]
+external_skills = ["db-migrations"]
 
 [memory]
 dream_schedule = "nightly"    # nightly | manual | cron

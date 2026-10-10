@@ -18,6 +18,10 @@ egress_allow = []
 permissions_ask = ["git push"]
 # Files agents may not read (gitignore patterns; a bare name matches at any depth).
 deny_reads = [".env", "*.pem", "*.key"]
+# Personal and plugin skills you have read and trust (`plugin:skill` for a
+# plugin's). Agents may preload only these and the spec's own skills, and
+# `mezha verify` warns about any other skill that loads here.
+external_skills = []
 
 # [memory]
 # dream_schedule = "manual"    # nightly | manual | cron; see `mezha dream --schedule`

@@ -103,6 +103,7 @@ fn json_report_has_a_stable_shape() {
             "branch-protection",
             "dreamer",
             "bodies",
+            "inventory",
             "plugin-validate"
         ]
     );

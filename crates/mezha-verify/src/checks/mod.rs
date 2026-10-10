@@ -2,6 +2,7 @@ pub mod bodies;
 pub mod config;
 pub mod dreamer;
 pub mod hygiene;
+pub mod inventory;
 pub mod layers;
 pub mod plugin;
 pub mod protection;

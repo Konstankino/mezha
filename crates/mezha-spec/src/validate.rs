@@ -152,6 +152,17 @@ fn policy(spec: &Spec, d: &mut Diagnostics) {
             );
         }
     }
+    for (i, name) in policy.external_skills.iter().enumerate() {
+        if let Some(problem) = external_skill_problem(name) {
+            d.error(format!("policy.external_skills[{i}]"), problem, None);
+        } else if spec.skill.contains_key(name) {
+            d.warn(
+                format!("policy.external_skills[{i}]"),
+                format!("`{name}` is defined in this spec, so listing it here does nothing"),
+                Some("remove it"),
+            );
+        }
+    }
     if !policy.sandbox {
         d.warn(
             "policy.sandbox",
@@ -227,6 +238,28 @@ fn memory(spec: &Spec, d: &mut Diagnostics) {
             None,
         );
     }
+}
+
+/// A skill name, or `plugin:skill`: what an agent's `skills` and Claude's
+/// skill listing call it.
+fn external_skill_problem(name: &str) -> Option<String> {
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 64
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
+    let valid = match name.split_once(':') {
+        Some((plugin, skill)) => ok(plugin) && ok(skill),
+        None => ok(name),
+    };
+    (!valid).then(|| {
+        format!(
+            "`{}` is not a skill name: use letters, digits, `-`, `_` and `.`, and `plugin:skill` for a plugin's",
+            name.escape_debug()
+        )
+    })
 }
 
 /// These strings are pasted into permission rules such as `Read(...)`; a
@@ -329,14 +362,17 @@ fn agents(spec: &Spec, d: &mut Diagnostics) {
 
         for skill in &agent.skills {
             frontmatter_text(d, &at("skills"), skill);
-            if !spec.skill.contains_key(skill) {
-                d.warn(
+            if !spec.skill.contains_key(skill) && !spec.policy.external_skills.contains(skill) {
+                d.error(
                     at("skills"),
                     format!(
-                        "skill `{skill}` is not defined in this spec; it must come from a \
-                         plugin or the user's own skills"
+                        "skill `{skill}` is neither defined in this spec nor listed in \
+                         policy.external_skills, so nobody has reviewed what the agent preloads"
                     ),
-                    None,
+                    Some(
+                        "define it with [skill.<name>], or read the personal or plugin skill and \
+                         add its name (`plugin:skill` for a plugin's) to policy.external_skills",
+                    ),
                 );
             }
         }

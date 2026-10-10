@@ -66,6 +66,11 @@ pub struct Policy {
     pub permissions_ask: Vec<String>,
     /// Paths agents may not read (gitignore patterns, as in `Read(...)` rules).
     pub deny_reads: Vec<String>,
+    /// Skills from outside the repository a person has reviewed: personal
+    /// skills by name, plugin skills as `plugin:skill`. An agent may preload
+    /// only these and the spec's own, and verify warns about any other that
+    /// loads (OWASP AST09).
+    pub external_skills: Vec<String>,
 }
 
 impl Default for Policy {
@@ -75,6 +80,7 @@ impl Default for Policy {
             egress_allow: Vec::new(),
             permissions_ask: Vec::new(),
             deny_reads: Vec::new(),
+            external_skills: Vec::new(),
         }
     }
 }

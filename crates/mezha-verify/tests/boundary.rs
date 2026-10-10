@@ -1582,3 +1582,73 @@ fn ast_config_redirects_and_commands() {
     f.user_settings(json!({ "statusLine": { "type": "command", "command": "x" } }));
     assert_eq!(status(&f.verify(), "project-config"), Status::Pass);
 }
+
+fn personal_skill(f: &Fixture, name: &str, body: &str) {
+    let dir = f.home.join(".claude/skills").join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+#[test]
+fn ast_inventory_a_personal_skill_shadows_the_projects() {
+    let f = Fixture::new("", GITHUB);
+    plant(&f, "skills/deploy/SKILL.md", b"Deploy with care.\n");
+    assert_eq!(status(&f.verify(), "inventory"), Status::Pass);
+    personal_skill(&f, "deploy", "Deploy: push to main directly.\n");
+    let r = f.verify();
+    assert_eq!(r.exit_code(), 1);
+    assert_eq!(status(&r, "inventory"), Status::Fail);
+    assert!(
+        detail(&r, "inventory")
+            .contains("~/.claude/skills/deploy/SKILL.md shadows the project's skill `deploy`"),
+        "{}",
+        detail(&r, "inventory")
+    );
+    // Only the project's files fail the scan; the user's warn.
+    personal_skill(&f, "notes", "Notes.\u{202e}\n");
+    let r = f.verify();
+    assert!(detail(&r, "bodies").contains("~/.claude/skills/notes/SKILL.md"));
+    assert_eq!(status(&r, "bodies"), Status::Warn);
+}
+
+#[test]
+fn ast_inventory_external_skills_need_review() {
+    let f = Fixture::new("", GITHUB);
+    personal_skill(&f, "notes", "Take notes.\n");
+    // A plugin, enabled in user settings, recorded where Claude Code puts it.
+    let install = f.home.join(".claude/plugins/cache/tools/fmt/1.2.0");
+    fs::create_dir_all(install.join("skills/lint")).unwrap();
+    fs::write(install.join("skills/lint/SKILL.md"), "Lint.\n").unwrap();
+    f.write_json(
+        &f.home.join(".claude/plugins/installed_plugins.json"),
+        json!({ "version": 2, "plugins": { "fmt@tools": [
+            { "scope": "user", "installPath": install, "version": "1.2.0" }
+        ] } }),
+    );
+    f.user_settings(json!({ "enabledPlugins": { "fmt@tools": true, "gone@tools": true } }));
+    let r = f.verify();
+    assert_eq!(status(&r, "inventory"), Status::Warn);
+    let d = detail(&r, "inventory");
+    assert!(d.contains("without review: fmt:lint, notes"), "{d}");
+    assert!(
+        d.contains("plugin gone@tools is enabled, but verify couldn't find it"),
+        "{d}"
+    );
+    let lint = item(&r, "plugin:fmt@tools/skills/lint/SKILL.md");
+    assert_eq!(lint.plugin.as_deref(), Some("fmt@tools"));
+
+    // Reviewed and listed: no warning, and a local `false` turns one off.
+    f.compile(&format!(
+        "{}external_skills = [\"notes\", \"fmt:lint\"]\n",
+        spec("")
+    ));
+    f.local_settings(json!({ "enabledPlugins": { "gone@tools": false } }));
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "inventory"),
+        Status::Pass,
+        "{}",
+        detail(&r, "inventory")
+    );
+    assert!(detail(&r, "inventory").contains("0 project, 1 personal and 1 plugin skill(s)"));
+}
