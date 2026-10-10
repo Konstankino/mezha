@@ -40,6 +40,14 @@ const QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: 
 /// lacks can't wipe out the main answer.
 const ADMIN_QUERY: &str = "query($owner: String!, $name: String!) { viewer { login } repository(owner: $owner, name: $name) { defaultBranchRef { branchProtectionRule { isAdminEnforced requiresApprovingReviews requiresCodeOwnerReviews lockBranch restrictsPushes pushAllowances(first: 100) { nodes { actor { __typename ... on User { login } ... on Team { slug organization { login } } } } } bypassPullRequestAllowances(first: 100) { nodes { actor { __typename ... on User { login } ... on Team { slug organization { login } } } } } } } } }";
 
+/// Whether the classic rule requires signed commits. Asked on its own,
+/// like the admin query, so an older server that lacks the field can't wipe
+/// out the main answer.
+const SIGNATURES_QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { defaultBranchRef { refUpdateRule { requiresSignatures } } } }";
+
+/// The ruleset rule type that requires signed commits.
+const SIGNATURES_RULE: &str = "required_signatures";
+
 /// The viewer's teams in one organization, for allowance lists that name
 /// teams.
 const TEAMS_QUERY: &str = "query($org: String!, $me: String!) { organization(login: $org) { teams(userLogins: [$me], first: 100) { nodes { slug } } } }";
@@ -558,6 +566,8 @@ pub struct Facts {
     pub viewer_teams: Option<Vec<(String, String)>>,
     /// A GitHub Enterprise Server's `installed_version`.
     pub server_version: Option<String>,
+    /// Whether the classic rule requires signed commits.
+    pub classic_signatures: Option<bool>,
     pub not_logged_in: bool,
     /// What went wrong on the way, for the message.
     pub problems: Vec<String>,
@@ -664,6 +674,15 @@ pub fn gather(repo: &Repo, gh: &mut dyn FnMut(&[&str]) -> GhOut) -> Facts {
     if facts.permission.as_deref() == Some("ADMIN") && matches!(facts.classic, Some(Some(_))) {
         gather_admin(&[&owner, &name], gh, &mut facts);
     }
+    if matches!(facts.classic, Some(Some(_))) {
+        let query = format!("query={SIGNATURES_QUERY}");
+        if let GhOut::Ok(text) = gh(&["graphql", "-f", &query, "-f", &owner, "-f", &name]) {
+            facts.classic_signatures = serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+                v["data"]["repository"]["defaultBranchRef"]["refUpdateRule"]["requiresSignatures"]
+                    .as_bool()
+            });
+        }
+    }
     let base = format!("repos/{}/{}", repo.owner, repo.name);
     let rules = format!("{base}/rules/branches/{}", encode(&branch));
     match gh(&["--method", "GET", "--paginate", &rules]) {
@@ -678,7 +697,7 @@ pub fn gather(repo: &Repo, gh: &mut dyn FnMut(&[&str]) -> GhOut) -> Facts {
         .rules
         .iter()
         .flatten()
-        .filter(|r| BLOCKING_RULES.contains(&r.kind.as_str()))
+        .filter(|r| BLOCKING_RULES.contains(&r.kind.as_str()) || r.kind == SIGNATURES_RULE)
         .filter_map(|r| r.ruleset)
         .collect();
     ids.sort_unstable();
@@ -953,7 +972,40 @@ pub fn judge(facts: &Facts) -> Judgement {
     } else {
         Verdict::Unprotected
     };
+    // Where nothing protects the branch, that is the finding; signing comes
+    // after it.
+    if j.verdict != Verdict::Unprotected && signatures(facts) == Some(false) {
+        j.warnings.push(format!(
+            "commits to {} don't have to be signed, so a change to agents, skills, rules or memory isn't tied to a verified identity (turn on \"Require signed commits\")",
+            j.branch.as_deref().map_or("the default branch".to_string(), |b| format!("`{b}`"))
+        ));
+    }
     j
+}
+
+/// Whether pushes to the branch must carry verified signatures (OWASP
+/// AST02, "verified code-signing identity"): an active ruleset rule or the
+/// classic rule says so. `None` when a ruleset is hidden or the classic
+/// answer is missing, so no warning rests on a guess.
+fn signatures(facts: &Facts) -> Option<bool> {
+    let rules = facts.rules.as_ref()?;
+    let mut hidden = false;
+    for rule in rules.iter().filter(|r| r.kind == SIGNATURES_RULE) {
+        match rule.ruleset.and_then(|id| facts.rulesets.get(&id)) {
+            Some(ruleset) if ruleset.active => return Some(true),
+            Some(_) => {}
+            None => hidden = true,
+        }
+    }
+    if facts.classic_signatures == Some(true) {
+        return Some(true);
+    }
+    let classic_known = match &facts.classic {
+        Some(None) => true,
+        Some(Some(_)) => facts.classic_signatures.is_some(),
+        None => false,
+    };
+    (!hidden && classic_known).then_some(false)
 }
 
 /// What an admin's classic rule blocks: with admins enforced, the
@@ -1037,6 +1089,8 @@ mod tests {
         let path = args.last().unwrap();
         if all.contains("branchProtectionRule") {
             "admin.json".into()
+        } else if all.contains("requiresSignatures") {
+            "signatures.json".into()
         } else if all.contains("userLogins") {
             "teams.json".into()
         } else if args[0] == "graphql" {
@@ -1135,6 +1189,51 @@ mod tests {
                 "code-owner review is required and there is no CODEOWNERS file".into()
             )
         );
+    }
+
+    #[test]
+    fn unsigned_commits_on_a_protected_branch_warn() {
+        let classic = |answer: Option<&'static str>| {
+            verdict("cli-cli", move |file, text| {
+                match file {
+                "signatures.json" => answer.map(|a| {
+                    format!(
+                        r#"{{"data":{{"repository":{{"defaultBranchRef":{{"refUpdateRule":{{"requiresSignatures":{a}}}}}}}}}}}"#
+                    )
+                }),
+                _ => as_writer(file, text),
+            }
+            })
+        };
+        let j = classic(Some("false"));
+        assert_eq!(j.verdict, Verdict::Protected);
+        assert_eq!(j.warnings.len(), 1, "{j:?}");
+        assert!(
+            j.warnings[0].contains("`trunk` don't have to be signed"),
+            "{j:?}"
+        );
+        assert!(classic(Some("true")).warnings.is_empty());
+        // No answer, no warning: nothing rests on a guess.
+        assert!(classic(None).warnings.is_empty());
+
+        // Rulesets alone: unsigned until an active ruleset requires it.
+        let j = verdict("sandbox-runtime", as_writer);
+        assert!(j.warnings.iter().any(|w| w.contains("signed")), "{j:?}");
+        let j = verdict("sandbox-runtime", |file, text| match file {
+            "rules.json" => text.map(|t| {
+                let mut rules: Value = serde_json::from_str(&t).unwrap();
+                rules.as_array_mut().unwrap().push(serde_json::json!(
+                    { "type": "required_signatures", "ruleset_id": 4126768 }
+                ));
+                rules.to_string()
+            }),
+            _ => as_writer(file, text),
+        });
+        assert!(!j.warnings.iter().any(|w| w.contains("signed")), "{j:?}");
+        // Nothing protects hello-world: that is the finding, not signing.
+        let j = verdict("hello-world", as_writer);
+        assert_eq!(j.verdict, Verdict::Unprotected);
+        assert!(j.warnings.is_empty(), "{j:?}");
     }
 
     #[test]

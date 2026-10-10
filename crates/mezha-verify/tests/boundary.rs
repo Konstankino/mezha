@@ -542,29 +542,28 @@ fn branch_protection_asks_gh_read_only_and_safely() {
 
     let log = fs::read_to_string(log).unwrap();
     let calls: Vec<&str> = log.lines().filter(|l| l.starts_with("ARGS")).collect();
-    assert_eq!(calls.len(), 3, "graphql, rules, codeowners: {calls:?}");
+    assert_eq!(
+        calls.len(),
+        4,
+        "graphql, signatures, rules, codeowners: {calls:?}"
+    );
     for call in &calls {
         assert!(call.starts_with("ARGS [api] "), "{call}");
         assert!(call.ends_with(" [--hostname] [github.com]"), "{call}");
         assert!(!call.contains("[-F]"), "{call}");
     }
-    assert!(
-        calls[0].contains("[graphql] [-f] [query=query("),
-        "{}",
-        calls[0]
-    );
-    assert!(
-        calls[0].contains("[-f] [owner=o] [-f] [name=r]"),
-        "{}",
-        calls[0]
-    );
-    for call in &calls[1..] {
+    for call in &calls[..2] {
+        assert!(call.contains("[graphql] [-f] [query=query("), "{call}");
+        assert!(call.contains("[-f] [owner=o] [-f] [name=r]"), "{call}");
+    }
+    assert!(calls[1].contains("requiresSignatures"), "{}", calls[1]);
+    for call in &calls[2..] {
         assert!(call.contains("[--method] [GET]"), "{call}");
     }
     assert!(
-        calls[1].contains("[repos/o/r/rules/branches/trunk]"),
+        calls[2].contains("[repos/o/r/rules/branches/trunk]"),
         "{}",
-        calls[1]
+        calls[2]
     );
     assert!(log.contains("ENV GH_PROMPT_DISABLED=1"));
     assert!(log.contains("ENV GH_PAGER=cat"));
