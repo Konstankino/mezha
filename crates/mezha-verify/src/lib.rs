@@ -136,6 +136,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         push,
         checks::settings::check(ctx, &rendered, opts),
         checks::layers::check(ctx, &layers, opts),
+        checks::config::check(ctx, &layers),
         checks::hygiene::check(ctx, &spec, &rendered),
         protection,
         checks::dreamer::check(ctx, &spec, opts),

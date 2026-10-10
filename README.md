@@ -29,6 +29,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 | Git guard rail in `env` (no credential helper, no askpass) | *Advisory* | It closes accidental helper use, but a command can name a helper itself (`git -c credential.helper=...`). |
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
+| Repository config that runs code (`project-config` in verify) | Integrity | Settings that run a command, install plugins or point Claude's traffic elsewhere, and MCP servers from `.mcp.json`, all run outside the sandbox when a session starts. verify fails on them in the shared settings file and on any approval of every `.mcp.json` server, and warns about servers and about such settings in your local file. |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
 | A dream writes only the role's staged memory | **Boundary** (Claude Code permissions) | The dreamer runs as `claude -p --restricted` with `dontAsk`, no prompts, five file tools and one allow rule; mezha stops it if Claude Code reports other tools, MCP servers or another mode. See [Dreams](#dreams). |
@@ -192,6 +193,8 @@ the command's own output in the tool result, not Claude's summary. Without
     credential files and token variables withheld;
   - `disableSkillShellExecution`: skills and commands can't run shell
     commands when they load;
+  - `enableAllProjectMcpServers: false`: each server in `.mcp.json` waits
+    for your approval;
   - one `PreToolUse` hook on every tool: the approval gate.
 - `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md` and
   `.claude/rules/<name>.md`: frontmatter from the spec, body from your

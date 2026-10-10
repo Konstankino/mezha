@@ -210,6 +210,11 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
         // sees it; with this it inserts a placeholder instead (OWASP AST04,
         // "staged loader"). Bundled and managed skills aren't affected.
         "disableSkillShellExecution": true,
+        // MCP servers run outside the sandbox: none from `.mcp.json` start
+        // without a person approving each (OWASP AST02). This beats `true`
+        // in user settings; local settings can still override it, and
+        // verify fails when they do.
+        "enableAllProjectMcpServers": false,
         "env": env,
         "permissions": { "ask": ask, "deny": deny },
         "hooks": {

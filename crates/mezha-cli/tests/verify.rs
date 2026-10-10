@@ -98,6 +98,7 @@ fn json_report_has_a_stable_shape() {
             "push-boundary",
             "settings-intact",
             "settings-layers",
+            "project-config",
             "git-hygiene",
             "branch-protection",
             "dreamer",

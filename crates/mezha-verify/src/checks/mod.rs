@@ -1,4 +1,5 @@
 pub mod bodies;
+pub mod config;
 pub mod dreamer;
 pub mod hygiene;
 pub mod layers;
