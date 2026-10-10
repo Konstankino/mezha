@@ -54,6 +54,7 @@ fn an_invalid_spec_writes_nothing() {
 name = "bad"
 
 [agent.researcher]
+tools = ["Read", "WebFetch"]
 rule_of_two = ["untrusted_input", "private_data", "external_action"]
 "#,
     );

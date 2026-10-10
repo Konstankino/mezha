@@ -270,8 +270,9 @@ memory = { scope = "project" }
   and the sandbox protect them) and may not be symlinks.
 - `tools` takes tool names. Only `Bash(...)` and `Agent(...)` take a scope;
   `Bash(cargo test *)` gives the agent Bash plus the advisory `agent-bash`
-  hook. Leaving `tools` out gives the agent every tool, which compile warns
-  about; `tools = []` gives it none.
+  hook. `tools` is the agent's permission manifest, so it is required:
+  without it the agent would inherit every tool, MCP tools included.
+  `tools = []` gives it none.
 - Every agent body ends with a mezha paragraph asking the agent to list
   what it couldn't finish under `## Unresolved` (in English whatever the
   answer language); `mezha metrics` counts those per week.
@@ -572,7 +573,9 @@ compiler refuses, among other things:
 - an agent with all three Rule of Two properties (`untrusted_input`,
   `private_data`, `external_action`), unless `human_gate = "advisory"`;
 - an agent without a `rule_of_two` list (an empty list is fine);
-- unscoped `Bash` in a skill's `allowed_tools`;
+- unscoped `Bash` in a skill's `allowed_tools` (and `WebFetch`,
+  `WebSearch` or an MCP tool there is a warning: while the skill is active
+  they reach outside the sandbox without asking);
 - an agent's `skills` entry that is neither a skill in the spec nor listed
   in `policy.external_skills` (personal skills by name, plugin skills as
   `plugin:skill`), so nothing preloads unreviewed;
@@ -580,6 +583,7 @@ compiler refuses, among other things:
   project or user scope;
 - a knowledge skill whose description is under 40 characters or lacks
   "Use when";
+- an agent without `tools` (`tools = []` is fine);
 - an agent without a `description`, a body path outside `mezha/`, a tool
   scope other than on `Bash` or `Agent`, and frontmatter text containing
   `---`, control characters or hidden characters.

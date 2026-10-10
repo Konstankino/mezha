@@ -41,7 +41,7 @@ external_skills = []
 # [agent.implementer]
 # description = "Implements changes in this workspace. Use for coding tasks."
 # model = "sonnet"
-# tools = ["Read", "Edit", "Write", "Bash(cargo test *)"]  # Bash scopes: advisory
+# tools = ["Read", "Edit", "Write", "Bash(cargo test *)"]  # required; Bash scopes: advisory
 # rule_of_two = ["untrusted_input", "private_data"]  # at most two of three
 # memory = { scope = "project" }  # read-only in sessions; `mezha dream` updates it
 #                                 # dream_policy = "lessons" | "verified-facts" | "attack-patterns-only"

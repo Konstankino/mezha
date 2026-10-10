@@ -372,12 +372,13 @@ fn frontmatter_strings_must_not_hide_text() {
 
 #[test]
 fn agent_tools() {
-    // No tools key: everything is inherited, which deserves a warning.
+    // No tools key: everything would be inherited (OWASP AST03: no
+    // permission manifest, no build).
     let d = check(&format!(
         "{BASE}\n[agent.a]\ndescription = \"x\"\nrule_of_two = []\n"
     ));
-    assert!(!d.has_errors());
-    assert_eq!(paths(&d, Severity::Warning), ["agent.a.tools"]);
+    let e = only_error(&d, "agent.a.tools");
+    assert!(e.message.contains("permission manifest"), "{e}");
     // tools = [] is fine: no tools at all.
     let d = check(&format!(
         "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = []\nrule_of_two = []\n"
@@ -505,4 +506,18 @@ fn dream_schedules() {
     let d = check(&format!("{BASE}\n[memory]\ndream_at = \"04:00\"\n"));
     assert!(!d.has_errors());
     assert_eq!(paths(&d, Severity::Warning), ["memory.dream_at"]);
+}
+
+#[test]
+fn skills_that_reach_out_without_asking_warn() {
+    let d = check(&format!(
+        "{BASE}\n[skill.k]\npreset = \"command\"\ndescription = \"Do it.\"\nallowed_tools = [\"Read\", \"WebFetch\", \"mcp__tracker__create\", \"Bash(cargo test *)\"]\n"
+    ));
+    assert!(!d.has_errors(), "{:#?}", d.0);
+    let reach: Vec<_> = d
+        .warnings()
+        .filter(|w| w.message.contains("outside the sandbox"))
+        .map(|w| w.message.split('`').nth(1).unwrap())
+        .collect();
+    assert_eq!(reach, ["WebFetch", "mcp__tracker__create"]);
 }

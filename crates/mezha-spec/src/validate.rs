@@ -439,9 +439,10 @@ pub fn is_unscoped_bash(tool: &str) -> bool {
 fn agent_tools(agent: &crate::model::Agent, at: &dyn Fn(&str) -> String, d: &mut Diagnostics) {
     let known = |name: &str| KNOWN_TOOLS.contains(&name) || name.starts_with("mcp__");
     let Some(tools) = &agent.tools else {
-        d.warn(
+        d.error(
             at("tools"),
-            "is not set, so the agent inherits every tool, including MCP tools and unscoped Bash",
+            "is missing, so the agent would inherit every tool, MCP tools and unscoped Bash \
+             included: an agent's tools are its permission manifest",
             Some("list the tools it needs; tools = [] gives it none"),
         );
         return;
@@ -600,6 +601,17 @@ fn skills(spec: &Spec, d: &mut Diagnostics) {
                     at("allowed_tools"),
                     format!("`{tool}` lets the skill run any command without asking"),
                     Some("scope it to the commands the skill needs, such as Bash(cargo test *)"),
+                );
+            }
+            let name = parse_tool(tool).map_or(tool.as_str(), |e| e.name);
+            if matches!(name, "WebFetch" | "WebSearch") || name.starts_with("mcp__") {
+                d.warn(
+                    at("allowed_tools"),
+                    format!(
+                        "`{tool}` reaches outside the sandbox without asking while the skill is \
+                         active, a way out for anything the agent has read"
+                    ),
+                    Some("leave it out, so each use asks"),
                 );
             }
         }
