@@ -1,0 +1,46 @@
+# mezha.toml: mezha's own .claude/ setup. Edit this file, then run
+# `mezha compile` from your own terminal. The README warns about compiling
+# in this repository: the hook fails closed, so a broken or missing `mezha`
+# on PATH blocks every tool call in the next session here.
+
+[project]
+name = "mezha"
+os_mode = "full"
+
+[policy]
+sandbox = true
+# No network for sandboxed commands: cargo builds offline from the
+# registry cache, so new dependencies come from a person.
+egress_allow = []
+permissions_ask = ["git push"]
+deny_reads = [".env", "*.pem", "*.key"]
+# WebFetch only to the documentation this work leans on: Claude Code's
+# (hooks, settings, permissions), GitHub's (GraphQL, rulesets) and Rust's.
+# Anything else is blocked by the gate, and a body may not link elsewhere.
+fetch_allow = ["code.claude.com", "docs.github.com", "docs.rs", "doc.rust-lang.org"]
+
+[memory]
+dream_schedule = "manual"
+default_scope = "project"
+
+[agent.implementer]
+description = "Implements changes in the mezha Rust workspace, with tests, golden files and README kept in step. Use for coding tasks in this repository."
+model = "sonnet"
+tools = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Edit",
+  "Write",
+  "Bash(cargo *)",
+  "Bash(git status *)",
+  "Bash(git diff *)",
+  "Bash(git log *)",
+  "Bash(git show *)",
+  "Bash(head *)",
+  "Bash(tail *)",
+  "Bash(grep *)",
+]
+# It reads the workspace, but takes no untrusted input and can't push.
+rule_of_two = ["private_data"]
+memory = { scope = "project" }
