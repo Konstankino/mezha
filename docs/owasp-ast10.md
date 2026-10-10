@@ -7,6 +7,9 @@ mitigations are paraphrased; read the whitepaper for the full text. The
 decisions behind this mapping are in
 [ADR-0007](adr/0007-owasp-agentic-skills-top-10.md).
 
+The state described is mezha's as of 2026-10-10 (hook protocol 2), and
+[In this repository](#in-this-repository) shows it applied to mezha itself.
+
 mezha is a governance layer for Claude Code projects, not a registry or a
 marketplace. It compiles a project's agents, skills and rules from
 `mezha.toml`, proves the boundary with `mezha verify`, and lets agent memory
@@ -118,6 +121,13 @@ local equivalent, the row names it.
 | Inventory with version, hash and last-verified time | Evidence | `verify --json`: `inventory` and `verified_at`. |
 | Semantic check of changes, with people in the loop | *Advisory* | Body scans; dreams reviewed by a person. |
 
+mezha's own updates drift too: the settings a project compiled and the
+`mezha` on `PATH` can come from different versions. Every generated hook
+command carries a protocol number. A newer `mezha` still runs an older
+one's commands until the next compile, and an older `mezha` refuses a newer
+one's, fail-closed, saying which to install (ADR-0002). verify runs the
+gate with the `mezha` on `PATH` and fails when it doesn't behave.
+
 ## AST08 Poor Scanning
 
 | Mitigation | Status | In mezha |
@@ -144,7 +154,7 @@ local equivalent, the row names it.
 | Mitigation | Status | In mezha |
 |---|---|---|
 | A central inventory | Evidence | Per project: `mezha.toml` and `verify --json`. |
-| Approval workflow for installs | Integrity | Generated files go through `compile`; external skills through `policy.external_skills`. |
+| Approval workflow for installs | Integrity | Generated files go through `compile`; external skills through `policy.external_skills`, pinned to their fingerprints. |
 | Restrict installation pathways | Partial | `project-config` fails on plugins and marketplaces in the shared settings; personal installs are listed. |
 | Non-human identities with scoped credentials | Out of scope | Sandboxed commands get none. |
 | Audit logging of skill actions | Evidence | The audit log, and the dream changelog and commits for memory. |
@@ -180,6 +190,34 @@ local equivalent, the row names it.
 | `risk_tier` | Not declared by the author: Rule of Two is checked per agent |
 | `scan_status` | `verify`'s `bodies` check and each inventory item's `scan` |
 | `requires.binaries` | None |
+
+## In this repository
+
+mezha's own [`mezha.toml`](../mezha.toml) applies the above to this
+repository:
+
+- the sandbox on and strict, with no network for commands
+  (`egress_allow = []`) and credentials withheld;
+- `git push` gated, and `.env`, keys and certificates unreadable;
+- WebFetch limited to the documentation the work needs (`code.claude.com`,
+  `docs.github.com`, `docs.rs`, `doc.rust-lang.org`);
+- the 13 personal skills synced from claude.ai that load here, listed in
+  `external_skills` and pinned to their fingerprints;
+- auto memory read-only, and the implementer agent with explicit tools,
+  scoped Bash, Rule of Two `private_data` and read-only project memory;
+- [CODEOWNERS](../.github/CODEOWNERS) owning `mezha.toml`, `mezha/`,
+  `.claude/` and `.github/`.
+
+`mezha verify`, run inside a session here on 2026-10-10: 9 passed, 0 failed,
+and 1 warning. The warning is `bodies` on phrases in two of the synced skills
+(`google-workspace`, `import-memory`).
+
+What isn't in place yet:
+
+- `branch-protection` is skipped: the repository has no GitHub remote, so
+  nothing requires code-owner review or signed commits (AST02, AST09)
+  until it gets one with a protected default branch;
+- CI doesn't run `mezha verify --project-only`.
 
 ## Known limits
 
