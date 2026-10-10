@@ -18,6 +18,24 @@ deny_reads = [".env", "*.pem", "*.key"]
 # (hooks, settings, permissions), GitHub's (GraphQL, rulesets) and Rust's.
 # Anything else is blocked by the gate, and a body may not link elsewhere.
 fetch_allow = ["code.claude.com", "docs.github.com", "docs.rs", "doc.rust-lang.org"]
+# Personal skills synced from claude.ai that load in every session here,
+# pinned to the fingerprints `mezha verify` printed on 2026-10-10: verify
+# fails when any file in one of them changes, until its pin is updated.
+external_skills = [
+  "built-in-browser@sha256:24ccb29c9502c8039576af686648930bbdffafc570de039bac58a0ec23bd99b3",
+  "chrome-browser@sha256:824d5bfbbbf185e839de8d5bde75ddc0fcd6c179217d1c1ffc42462048421d5c",
+  "computer-use@sha256:82092e79531e2ec2f1ec6f3f90651a6f1a9a7d6631e8886e046ce03b4f612849",
+  "deep-research@sha256:29b74b1e77a01f6a5b37e25f0cef07b984d127d6e560b1f41e6ca5ab1c9b8a7d",
+  "docs@sha256:d2eac61dbad0085d2753cdbfd381ac63d3780e64b431f7e1d6c49c49712087b5",
+  "docx@sha256:825fa508b083ffea4e1e4b4695db893a57e97e02000da4941cc5345522acfd72",
+  "google-workspace@sha256:3666395504b47dc9b4ed86c7b8716886ea9b199502500b1524a7ee78670bd32f",
+  "import-memory@sha256:452989212015901fe47df8a57d540f29a3c2db6342fd085c672ec5e8b2f8f26c",
+  "morning@sha256:74d78dedb333ddfcc77554261df531f0450593407caef74aacfd27449580f700",
+  "pdf@sha256:80def036451088d1da7a9e02a819931c5af16092e56413530b18b789ef7a6226",
+  "pptx@sha256:e22e0c9748f999de21e611d2e413012e0c06505651eac19eb774792a98710051",
+  "skill-creator@sha256:05d0ded8741d36ca38423ee16d23603d6510bf01d0f35ec3f279b65be1034b4c",
+  "xlsx@sha256:a114c74e34ea97524d1e3ec458e06a17b3b419b6f41dfca5e592964590367f25",
+]
 
 [memory]
 dream_schedule = "manual"
