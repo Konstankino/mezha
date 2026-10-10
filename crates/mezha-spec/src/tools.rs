@@ -58,7 +58,8 @@ pub fn parse_tool(entry: &str) -> Option<ToolEntry<'_>> {
 /// the frontmatter block at the first `---` anywhere, and YAML forbids some
 /// characters that JSON escaping leaves raw (DEL, C1 controls, U+2028/2029,
 /// U+FFFE/FFFF). Other control characters are escaped, but nothing in a
-/// one-line field needs them.
+/// one-line field needs them. Hidden characters would let a description say
+/// one thing to a reviewer and another to Claude (OWASP AST04).
 pub fn frontmatter_problem(text: &str) -> Option<&'static str> {
     if text.contains("---") {
         return Some("contains `---`, which ends Claude Code's frontmatter early");
@@ -69,7 +70,41 @@ pub fn frontmatter_problem(text: &str) -> Option<&'static str> {
     {
         return Some("contains a control character or a line or paragraph separator");
     }
+    if hidden_char(text).is_some() {
+        return Some("contains a hidden character (zero-width, bidi control or tag character)");
+    }
     None
+}
+
+/// Characters that render as nothing (or reorder text) and so can hide
+/// words from a reviewer.
+pub fn is_hidden(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}' | '\u{061c}' | '\u{180e}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{feff}'
+        | '\u{e0000}'..='\u{e007f}')
+}
+
+/// Characters a zero-width joiner may legitimately join.
+pub fn is_emoji(c: char) -> bool {
+    matches!(c, '\u{1f000}'..='\u{1faff}' | '\u{2600}'..='\u{27bf}' | '\u{fe0f}')
+}
+
+/// The first hidden character in `text` and its byte offset. A zero-width
+/// joiner between two emoji is how emoji combine, so it doesn't count.
+pub fn hidden_char(text: &str) -> Option<(usize, char)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    chars.iter().enumerate().find_map(|(i, &(at, c))| {
+        let joins_emoji = c == '\u{200d}'
+            && i > 0
+            && is_emoji(chars[i - 1].1)
+            && chars.get(i + 1).is_some_and(|&(_, n)| is_emoji(n));
+        (is_hidden(c) && !joins_emoji).then_some((at, c))
+    })
 }
 
 #[cfg(test)]
@@ -104,5 +139,9 @@ mod tests {
         assert!(frontmatter_problem("c1\u{85}").is_some());
         assert!(frontmatter_problem("sep\u{2028}").is_some());
         assert!(frontmatter_problem("українська мова ✓").is_none());
+        assert!(frontmatter_problem("zero\u{200b}width").is_some());
+        assert!(frontmatter_problem("bidi \u{202e}x").is_some());
+        assert!(frontmatter_problem("tag \u{e0041}").is_some());
+        assert!(frontmatter_problem("family 👨\u{200d}👩").is_none());
     }
 }

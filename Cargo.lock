@@ -407,6 +407,7 @@ version = "0.0.1"
 dependencies = [
  "mezha-broker",
  "mezha-hooks",
+ "mezha-memory",
  "mezha-spec",
  "serde",
  "serde_json",

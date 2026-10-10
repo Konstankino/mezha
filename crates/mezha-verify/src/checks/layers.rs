@@ -51,6 +51,22 @@ pub fn check(ctx: &Ctx, layers: &Layers, opts: &Options) -> Check {
             );
         }
     }
+    // A `false` above the project file lets skills and commands run shell
+    // when they load again (OWASP AST04); a managed `true` can't be undone.
+    let managed_on = layers
+        .every("/disableSkillShellExecution")
+        .any(|(v, l)| l.scope == Scope::Managed && v == &Value::Bool(true));
+    if let Some((Value::Bool(false), layer)) = layers.winner("/disableSkillShellExecution")
+        && !managed_on
+    {
+        f.fail(
+            format!(
+                "disableSkillShellExecution is false in {}, so skills and commands can run shell commands when they load",
+                layer.label
+            ),
+            format!("Remove disableSkillShellExecution from {}.", layer.label),
+        );
+    }
     for (key, expected) in GIT_GUARD_ENV {
         if let Some((v, layer)) = layers.winner(&format!("/env/{key}"))
             && layer.scope != Scope::Project

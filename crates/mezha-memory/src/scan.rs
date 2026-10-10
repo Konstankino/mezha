@@ -10,9 +10,15 @@
 //!   instructions", `--no-verify`). Legitimate lessons quote them too ("avoid
 //!   `--no-verify`"), so they are only highlighted for the reviewer.
 //! - **PHI** patterns run only when the spec has PHI.
+//!
+//! Phrases are matched again on a folded copy without hidden characters and
+//! with fullwidth letters made plain, and base64 text is decoded (two layers
+//! at most) and scanned again; a finding inside it is marked `encoded`
+//! (OWASP AST08).
 
 use std::sync::OnceLock;
 
+use mezha_spec::{is_emoji, is_hidden};
 use regex::Regex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,6 +45,8 @@ pub struct Finding {
     pub end: usize,
     /// 1-based line of `start`.
     pub line: usize,
+    /// Found in base64-encoded text, which `start..end` spans.
+    pub encoded: bool,
 }
 
 impl Finding {
@@ -47,7 +55,13 @@ impl Finding {
     pub fn excerpt(&self, text: &str) -> String {
         let matched = text.get(self.start..self.end).unwrap_or("");
         let keep = match self.level {
-            Level::Hard if self.what.ends_with("token") || self.what.ends_with("key") => 4,
+            Level::Hard
+                if self.what.ends_with("token")
+                    || self.what.ends_with("key")
+                    || self.what.ends_with("secret") =>
+            {
+                4
+            }
             Level::Phi => 2,
             _ => 60,
         };
@@ -57,7 +71,8 @@ impl Finding {
         } else {
             ""
         };
-        format!("{}{cut}", escape(&shown))
+        let encoded = if self.encoded { "base64 " } else { "" };
+        format!("{encoded}{}{cut}", escape(&shown))
     }
 }
 
@@ -230,10 +245,96 @@ fn compiled() -> &'static [Regex] {
     })
 }
 
+/// Base64 runs at least this long are decoded and scanned again.
+const ENCODED_MIN: usize = 40;
+/// Layers of encoding decoded at most; text encoded deeper is flagged.
+const ENCODED_DEPTH: usize = 2;
+/// The most bytes one run may decode to; a longer run is flagged.
+const ENCODED_MAX: usize = 64 * 1024;
+
+/// Phrase finding for encoded text the scan couldn't look inside.
+pub const UNSCANNED: &str = "encoded text not scanned";
+
 /// Everything `scan` looks for in `text`, in order.
 pub fn findings(text: &str, scan: Scan) -> Vec<Finding> {
     let mut out = Vec::new();
-    let line_of = |at: usize| text[..at].matches('\n').count() + 1;
+    collect(text, scan, 0, &mut out);
+    out.sort_by_key(|f| (f.start, std::cmp::Reverse(f.end)));
+    out
+}
+
+/// Hard finding: shell that Claude Code runs when a skill or command loads.
+pub const SHELL_AT_LOAD: &str = "shell run at load";
+/// Phrase finding: a link to content outside the repository.
+pub const EXTERNAL_REFERENCE: &str = "external reference";
+
+/// What [`findings`] looks for in an agent, skill or rule body, phrases
+/// included, plus two things that matter only there. A skill or command
+/// (`runs_at_load`) may not hold `` !`cmd` `` or a ```` ```! ```` fence,
+/// which Claude Code runs before the model sees the text (OWASP AST04,
+/// "staged loader"). Links are
+/// phrases: Claude may fetch what they point at and follow it, and that
+/// content can change after review (AST05).
+pub fn body_findings(text: &str, runs_at_load: bool) -> Vec<Finding> {
+    static SHELL: OnceLock<Regex> = OnceLock::new();
+    static LINK: OnceLock<Regex> = OnceLock::new();
+    let mut out = findings(
+        text,
+        Scan {
+            phrases: true,
+            phi: false,
+        },
+    );
+    let mut add = |level, what, regex: &Regex| {
+        for m in regex.find_iter(text) {
+            out.push(Finding {
+                level,
+                what,
+                start: m.start(),
+                end: m.end(),
+                line: line_of(text, m.start()),
+                encoded: false,
+            });
+        }
+    };
+    if runs_at_load {
+        let shell = SHELL.get_or_init(|| {
+            // Claude Code runs `!` + backticks at the start of a line or
+            // after whitespace, and fences opened with three backticks and `!`.
+            Regex::new(r"(?m)(?:^|[ \t])!`[^`\n]+`|^[ \t]*```!")
+                .expect("the shell pattern is valid")
+        });
+        add(Level::Hard, SHELL_AT_LOAD, shell);
+    }
+    let link = LINK.get_or_init(|| {
+        Regex::new(r#"(?i)\b(?:https?|ftp)://[^\s<>()\[\]`'"]+"#)
+            .expect("the link pattern is valid")
+    });
+    add(Level::Phrase, EXTERNAL_REFERENCE, link);
+    out.sort_by_key(|f| (f.start, std::cmp::Reverse(f.end)));
+    out
+}
+
+/// The host a link found by [`body_findings`] points at.
+pub fn link_host(link: &str) -> &str {
+    let rest = link.split_once("://").map_or(link, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    host.split(':').next().unwrap_or(host)
+}
+
+fn collect(text: &str, scan: Scan, depth: usize, out: &mut Vec<Finding>) {
+    plain(text, scan, out);
+    folded(text, scan, out);
+    encoded(text, scan, depth, out);
+}
+
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at].matches('\n').count() + 1
+}
+
+/// The characters and patterns in `text` as written.
+fn plain(text: &str, scan: Scan, out: &mut Vec<Finding>) {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     for (i, &(at, c)) in chars.iter().enumerate() {
         let what = if c == '\r' {
@@ -266,7 +367,8 @@ pub fn findings(text: &str, scan: Scan) -> Vec<Finding> {
                 what,
                 start: at,
                 end: at + c.len_utf8(),
-                line: line_of(at),
+                line: line_of(text, at),
+                encoded: false,
             });
         }
     }
@@ -296,12 +398,151 @@ pub fn findings(text: &str, scan: Scan) -> Vec<Finding> {
                 what: pattern.what,
                 start: m.start(),
                 end: m.end(),
-                line: line_of(m.start()),
+                line: line_of(text, m.start()),
+                encoded: false,
             });
         }
     }
-    out.sort_by_key(|f| (f.start, std::cmp::Reverse(f.end)));
-    out
+}
+
+/// Phrases split by hidden characters or spelled in fullwidth letters
+/// (`ｉｇｎｏｒｅ`), matched on a folded copy and reported at the span they
+/// take in `text`. Only phrases: folding could make a hard marker out of
+/// text that isn't one (fullwidth `＜！－－` hides nothing).
+fn folded(text: &str, scan: Scan, out: &mut Vec<Finding>) {
+    if !scan.phrases {
+        return;
+    }
+    let mut view = String::with_capacity(text.len());
+    // The offset in `text` of each byte of `view`, and of its end.
+    let mut at_raw = Vec::with_capacity(text.len() + 1);
+    let mut changed = false;
+    for (at, c) in text.char_indices() {
+        let c = if is_hidden(c) {
+            changed = true;
+            continue;
+        } else if ('\u{ff01}'..='\u{ff5e}').contains(&c) {
+            changed = true;
+            char::from_u32(c as u32 - 0xfee0).unwrap_or(c)
+        } else {
+            c
+        };
+        at_raw.extend(std::iter::repeat_n(at, c.len_utf8()));
+        view.push(c);
+    }
+    if !changed {
+        return;
+    }
+    at_raw.push(text.len());
+    for (pattern, regex) in PATTERNS.iter().zip(compiled()) {
+        if pattern.level != Level::Phrase {
+            continue;
+        }
+        for m in regex.find_iter(&view) {
+            let (start, end) = (at_raw[m.start()], at_raw[m.end()]);
+            let seen = out
+                .iter()
+                .any(|f| f.what == pattern.what && f.start < end && start < f.end);
+            if !seen {
+                out.push(Finding {
+                    level: Level::Phrase,
+                    what: pattern.what,
+                    start,
+                    end,
+                    line: line_of(text, start),
+                    encoded: false,
+                });
+            }
+        }
+    }
+}
+
+/// Base64 runs that decode to text are scanned again, `ENCODED_DEPTH`
+/// layers deep; what is found inside is reported at the run's span. Runs
+/// that decode to binary are left alone, and runs too long or nested too
+/// deep are flagged as [`UNSCANNED`], so a clean result isn't claimed for
+/// them.
+fn encoded(text: &str, scan: Scan, depth: usize, out: &mut Vec<Finding>) {
+    static RUN: OnceLock<Regex> = OnceLock::new();
+    let run = RUN.get_or_init(|| {
+        Regex::new(&format!(r"[A-Za-z0-9+/_-]{{{ENCODED_MIN},}}={{0,2}}"))
+            .expect("the base64 pattern is valid")
+    });
+    for m in run.find_iter(text) {
+        let unscanned = |out: &mut Vec<Finding>| {
+            out.push(Finding {
+                level: Level::Phrase,
+                what: UNSCANNED,
+                start: m.start(),
+                end: m.end(),
+                line: line_of(text, m.start()),
+                encoded: true,
+            })
+        };
+        if m.len() / 4 * 3 > ENCODED_MAX {
+            unscanned(out);
+            continue;
+        }
+        let Some(inner) = decode_text(m.as_str()) else {
+            continue;
+        };
+        if depth >= ENCODED_DEPTH {
+            unscanned(out);
+            continue;
+        }
+        let mut found = Vec::new();
+        collect(&inner, scan, depth + 1, &mut found);
+        let mut whats: Vec<(Level, &'static str)> = Vec::new();
+        for f in found {
+            if !whats.contains(&(f.level, f.what)) {
+                whats.push((f.level, f.what));
+            }
+        }
+        for (level, what) in whats {
+            out.push(Finding {
+                level,
+                what,
+                start: m.start(),
+                end: m.end(),
+                line: line_of(text, m.start()),
+                encoded: true,
+            });
+        }
+    }
+}
+
+/// `run` decoded from base64 (either alphabet, padding optional), if it
+/// decodes to text: UTF-8 without control characters other than line
+/// breaks and tabs.
+fn decode_text(run: &str) -> Option<String> {
+    let digits = run.trim_end_matches('=');
+    if digits.len() % 4 == 1 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 4 * 3 + 2);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for b in digits.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let binary = text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
+    (!binary).then_some(text)
 }
 
 /// `text` with every finding replaced by `[mezha: redacted <what>]`, and
@@ -336,23 +577,6 @@ fn is_control(c: char) -> bool {
     c.is_control()
 }
 
-/// Characters that render as nothing (or reorder text) and so can hide
-/// words from a reviewer.
-fn is_hidden(c: char) -> bool {
-    matches!(c,
-        '\u{00ad}' | '\u{061c}' | '\u{180e}'
-        | '\u{200b}'..='\u{200f}'
-        | '\u{2028}'..='\u{202e}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{2069}'
-        | '\u{feff}'
-        | '\u{e0000}'..='\u{e007f}')
-}
-
-fn is_emoji(c: char) -> bool {
-    matches!(c, '\u{1f000}'..='\u{1faff}' | '\u{2600}'..='\u{27bf}' | '\u{fe0f}')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +602,8 @@ mod tests {
         let text = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
         let f = &findings(text, Scan::default())[0];
         assert_eq!(f.excerpt(text), "ghp_…");
+        let text = "password = hunter2isweak";
+        let f = &findings(text, Scan::default())[0];
+        assert_eq!(f.excerpt(text), "pass…");
     }
 }

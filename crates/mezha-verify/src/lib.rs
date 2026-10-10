@@ -15,6 +15,7 @@ pub mod ctx;
 pub mod gitcfg;
 pub mod hosts;
 pub mod inside;
+pub mod inventory;
 pub mod layers;
 pub mod probe;
 pub mod report;
@@ -121,6 +122,15 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
     let protection =
         checks::protection::check(ctx, git.as_ref(), push.status == Status::Fail, opts);
 
+    let mut found = inventory::Inventory::default();
+    found.walk(
+        &ctx.root.join(".claude"),
+        ".claude",
+        inventory::Source::Project,
+        None,
+        &rendered.files,
+    );
+
     let checks = vec![
         sandbox.check,
         push,
@@ -129,6 +139,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         checks::hygiene::check(ctx, &spec, &rendered),
         protection,
         checks::dreamer::check(ctx, &spec, opts),
+        checks::bodies::check(&found),
         checks::plugin::check(ctx, opts),
     ];
     let mut notes = Vec::new();
@@ -171,6 +182,8 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         checks,
         summary: Default::default(),
         notes,
+        verified_at: Some(report::now_stamp()),
+        inventory: found.items,
     };
     report.summarize();
     report.redact();
@@ -210,6 +223,8 @@ fn verify_inside(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         checks,
         summary: Default::default(),
         notes,
+        verified_at: Some(report::now_stamp()),
+        inventory: Vec::new(),
     };
     report.summarize();
     report.redact();

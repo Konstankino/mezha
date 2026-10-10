@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use mezha_memory::scan::{self, EXTERNAL_REFERENCE, Level};
 use mezha_spec::{Agent, BashPattern, Rule, Scope, Skill, Spec, is_unscoped_bash, parse_tool};
 use serde_json::{Value, json};
 
@@ -26,29 +27,30 @@ pub fn render(spec: &Spec, root: &Path) -> Components {
     let mut out = Components::default();
     for (name, agent) in &spec.agent {
         let path = format!(".claude/agents/{name}.md");
-        let result = read_body(root, &agent.prompt_path(name), &mut out.warnings)
+        let result = read_body(root, &agent.prompt_path(name), false, &mut out.warnings)
             .and_then(|body| agent_file(spec, name, agent, &body));
         out.add(path, result);
     }
     for (name, skill) in &spec.skill {
         let path = format!(".claude/skills/{name}/SKILL.md");
-        let result = read_body(root, &skill.body_path(name), &mut out.warnings)
+        let result = read_body(root, &skill.body_path(name), true, &mut out.warnings)
             .and_then(|body| skill_file(name, skill, &body));
         out.add(path, result);
     }
     for (name, rule) in &spec.rule {
         let path = format!(".claude/rules/{name}.md");
-        let result = read_body(root, &rule.body_path(name), &mut out.warnings).and_then(|body| {
-            if let Some(max) = rule.max_lines
-                && body.lines().count() > max as usize
-            {
-                out.warnings.push(format!(
-                    "rule.{name}: the body has {} lines, more than max_lines = {max}",
-                    body.lines().count()
-                ));
-            }
-            rule_file(rule, &body)
-        });
+        let result =
+            read_body(root, &rule.body_path(name), false, &mut out.warnings).and_then(|body| {
+                if let Some(max) = rule.max_lines
+                    && body.lines().count() > max as usize
+                {
+                    out.warnings.push(format!(
+                        "rule.{name}: the body has {} lines, more than max_lines = {max}",
+                        body.lines().count()
+                    ));
+                }
+                rule_file(rule, &body)
+            });
         out.add(path, result);
     }
     out
@@ -67,8 +69,13 @@ impl Components {
 
 /// Reads a body file the way mezha writes files: no symlink on the way, a
 /// regular file, UTF-8, within [`MAX_BODY`]. A BOM is dropped and line
-/// endings become LF.
-fn read_body(root: &Path, rel: &str, warnings: &mut Vec<String>) -> Result<String, String> {
+/// endings become LF. The body is then scanned ([`scan_body`]).
+fn read_body(
+    root: &Path,
+    rel: &str,
+    runs_at_load: bool,
+    warnings: &mut Vec<String>,
+) -> Result<String, String> {
     crate::write::fence(root, rel).map_err(|e| e.to_string())?;
     let path = root.join(rel);
     let bytes = match std::fs::read(&path) {
@@ -94,7 +101,51 @@ fn read_body(root: &Path, rel: &str, warnings: &mut Vec<String>) -> Result<Strin
     if text.trim().is_empty() {
         warnings.push(format!("{rel} is empty"));
     }
+    scan_body(rel, &text, runs_at_load, warnings)?;
     Ok(text)
+}
+
+/// Claude reads a body as instructions, so what the scan calls hard (hidden
+/// characters, secrets, chat-template tokens, remote images, raw HTML and,
+/// in a skill, shell run at load) refuses it, and phrases and links are
+/// warnings (OWASP AST01, AST04, AST05, AST08). Advisory: patterns miss
+/// things, so the boundary is still the review of every body change.
+fn scan_body(
+    rel: &str,
+    text: &str,
+    runs_at_load: bool,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut hard = Vec::new();
+    let mut hosts: Vec<&str> = Vec::new();
+    for f in scan::body_findings(text, runs_at_load) {
+        if f.what == EXTERNAL_REFERENCE && !f.encoded {
+            let host = scan::link_host(&text[f.start..f.end]);
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+            continue;
+        }
+        let at = format!("{rel}:{}: {} ({})", f.line, f.what, f.excerpt(text));
+        match f.level {
+            Level::Hard | Level::Phi => hard.push(at),
+            Level::Phrase => warnings.push(format!("{at}: reads like an instruction to a model")),
+        }
+    }
+    if !hosts.is_empty() {
+        warnings.push(format!(
+            "{rel} links to {}: Claude may fetch and follow what is there, which can change after review; copy what it needs into the body",
+            hosts.join(", ")
+        ));
+    }
+    if hard.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}; bodies may not hold hidden characters, secrets, chat-template tokens, remote images, raw HTML or shell run at load",
+            hard.join("; ")
+        ))
+    }
 }
 
 fn assemble(frontmatter: &str, body: &str) -> String {

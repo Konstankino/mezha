@@ -329,6 +329,17 @@ fn frontmatter_strings_must_not_end_the_block() {
 }
 
 #[test]
+fn frontmatter_strings_must_not_hide_text() {
+    // A description that reads one way to a reviewer and another to Claude
+    // (OWASP AST04, ASCII smuggling).
+    let d = check(&format!(
+        "{BASE}\n[skill.k]\npreset = \"command\"\ndescription = \"Formats code.\\u200b\\U000E0049\\U000E0047\"\n"
+    ));
+    let e = only_error(&d, "skill.k.description");
+    assert!(e.message.contains("hidden character"), "{e:?}");
+}
+
+#[test]
 fn agent_tools() {
     // No tools key: everything is inherited, which deserves a warning.
     let d = check(&format!(

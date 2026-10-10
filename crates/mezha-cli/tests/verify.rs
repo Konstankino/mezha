@@ -101,6 +101,7 @@ fn json_report_has_a_stable_shape() {
             "git-hygiene",
             "branch-protection",
             "dreamer",
+            "bodies",
             "plugin-validate"
         ]
     );

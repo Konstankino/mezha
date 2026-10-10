@@ -20,7 +20,9 @@ pub use model::{
 };
 pub use names::check_name;
 pub use prefix::CommandPrefix;
-pub use tools::{KNOWN_TOOLS, ToolEntry, frontmatter_problem, parse_tool};
+pub use tools::{
+    KNOWN_TOOLS, ToolEntry, frontmatter_problem, hidden_char, is_emoji, is_hidden, parse_tool,
+};
 pub use validate::{
     Diagnostic, Diagnostics, Severity, body_path_problem, is_unscoped_bash, validate,
 };

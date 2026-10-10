@@ -206,6 +206,10 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
 
     let mut settings = json!({
         "$schema": SCHEMA_URL,
+        // Claude Code runs `!`cmd`` in a skill or command before the model
+        // sees it; with this it inserts a placeholder instead (OWASP AST04,
+        // "staged loader"). Bundled and managed skills aren't affected.
+        "disableSkillShellExecution": true,
         "env": env,
         "permissions": { "ask": ask, "deny": deny },
         "hooks": {

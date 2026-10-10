@@ -13,6 +13,7 @@ workspace = true
 mezha-spec.workspace = true
 mezha-hooks.workspace = true
 mezha-broker.workspace = true
+mezha-memory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true

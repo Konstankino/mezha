@@ -37,7 +37,8 @@ Every security feature is either a boundary or labelled advisory. Today:
 | Dream digests under `~/.mezha/dreams` | **Boundary** for sandboxed writes | The sandbox can't write `~/.mezha`, so a session can't plant digests; a deny rule keeps sessions from reading them. |
 | PHI memory stays local | **Boundary** (local scope) | PHI memory is never committed: the spec forces local scope and verify fails if local memory isn't git-ignored. |
 | The `dream-guard` hook | *Advisory* | It checks each of the dreamer's file paths, fail-closed, but a hook reads paths, so it backs up the permissions rather than replacing them. |
-| Injection, secret and PHI scans | *Advisory* | Patterns. They redact digests and refuse a dream with hidden characters, secrets or remote images, but they can miss things: read every dream diff. |
+| Skill shell off (`disableSkillShellExecution`) | **Boundary** (Claude Code) | Claude Code doesn't run `` !`cmd` `` in skills and commands, from any source, and shows a placeholder instead. Bundled and managed skills aren't affected. verify fails when another settings file turns it back on. |
+| Injection, secret and PHI scans | *Advisory* | Patterns. They redact digests, and refuse a dream or an agent, skill or rule body with hidden characters, secrets, remote images, raw HTML or, in a skill, shell run at load; `verify`'s `bodies` check scans every file that loads. Phrases are matched again with hidden characters removed and fullwidth letters folded, and base64 text is decoded two layers deep. They can still miss things: read every dream diff and body change. |
 | An agent's `Bash(...)` scope (`agent-bash` hook) | *Advisory* | Claude Code can't scope an agent's tools by argument, so a frontmatter hook reads each command and blocks anything outside the scope. It reads command text, like the gate. |
 | `mezha approve` refusing inside Claude Code | Speed bump | The boundary is the store's location, not this check. |
 | Anything on native Windows | *Advisory* | No sandbox, and hooks may run in PowerShell 5.1, which can't fail closed. `compile` refuses `os_mode = "native-windows"` until phase 4; use WSL2. |
@@ -159,7 +160,7 @@ the command's own output in the tool result, not Claude's summary. Without
 | `mezha compile` | Validates the spec and writes the generated files. Writes nothing if a generated file was written or edited by someone else. |
 | `mezha diff` | Shows what `compile` or `apply` would change, as a unified diff. |
 | `mezha apply [--yes]` | Like `compile`, but backs conflicting files up to `.mezha-backup/<UTC time>/` and overwrites them. |
-| `mezha verify [--json] [--project-only \| --probe \| --inside]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt`, and `--inside` is for Claude to run inside the session's sandbox ([Probing the boundary](#probing-the-boundary)). |
+| `mezha verify [--json] [--project-only \| --probe \| --inside]` | Checks that the boundary holds: sandbox in effect, no push possible, gate intact and switched on, default branch protected, and the agent, skill, rule and command files clean. `--json` adds an inventory of those files with fingerprints and scan results. Exit 0 pass, 1 a check failed, 2 couldn't run. `--project-only` looks at committed files only (for CI). `--probe` also runs side-effect-free probes inside `srt`, and `--inside` is for Claude to run inside the session's sandbox ([Probing the boundary](#probing-the-boundary)). |
 | `mezha dream [--role R] [--since 7d] [--base REV] [--dry-run \| --scheduled]` | Turns recent agent runs into reviewed memory: a commit on a new branch for project memory, a confirmed diff for local and user memory. Refuses inside Claude Code. See [Dreams](#dreams). |
 | `mezha dream --schedule launchd\|systemd\|cron` | Prints a snippet that runs `mezha dream --scheduled` every night. Installs nothing. See [Scheduling dreams](#scheduling-dreams). |
 | `mezha metrics [--since 30d] [--json] [--record]` | Session cost, rework proxies, unresolved items per week, and whether dreams landed without edits. See [Metrics](#metrics). |
@@ -189,6 +190,8 @@ the command's own output in the tool result, not Claude's summary. Without
     api.bitbucket.org) as denied hosts, writes to `~/.mezha`, `mezha.toml`,
     the state file, `mezha/`, `.claude/rules` and agent memory denied, and
     credential files and token variables withheld;
+  - `disableSkillShellExecution`: skills and commands can't run shell
+    commands when they load;
   - one `PreToolUse` hook on every tool: the approval gate.
 - `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md` and
   `.claude/rules/<name>.md`: frontmatter from the spec, body from your
@@ -236,7 +239,15 @@ memory = { scope = "project" }
   Edit tools Claude Code would add, and denies the path. Local memory must
   be git-ignored; `verify` fails if it isn't.
 - Nothing in a frontmatter value may contain `---`: Claude Code ends the
-  frontmatter at the first one.
+  frontmatter at the first one. Nor control or hidden characters
+  (zero-width, bidi controls, tag characters), which could make a
+  description read one way to you and another to Claude.
+- Claude reads a body as instructions, so compile scans it: hidden
+  characters, secrets, chat-template tokens, remote images, raw HTML
+  (comments included) and, in a skill, `` !`cmd` `` or a ```` ```! ```` fence
+  refuse it. Phrases that read like instructions to a model, and links to
+  other hosts (whose content can change after you review the body), are
+  warnings: copy what Claude needs into the body instead of linking it.
 - Agent, skill, rule or command files under `.claude/` that mezha doesn't
   generate are reported by `verify`, since they skip mezha's checks.
 
@@ -524,7 +535,7 @@ compiler refuses, among other things:
   "Use when";
 - an agent without a `description`, a body path outside `mezha/`, a tool
   scope other than on `Bash` or `Agent`, and frontmatter text containing
-  `---` or control characters.
+  `---`, control characters or hidden characters.
 
 Every error and warning names its place in the spec, such as
 `agent.implementer.rule_of_two`, and most come with a hint.

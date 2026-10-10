@@ -149,6 +149,21 @@ pub struct Report {
     pub checks: Vec<Check>,
     pub summary: Summary,
     pub notes: Vec<String>,
+    /// When verify ran, as `YYYYMMDDTHHMMSSZ` (UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+    /// Every agent, skill, rule and command file that loads in this project,
+    /// with its fingerprint and scan result (OWASP AST09).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inventory: Vec<crate::inventory::Item>,
+}
+
+/// The current time as `YYYYMMDDTHHMMSSZ` (UTC).
+pub fn now_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    mezha_render::utc_stamp(secs)
 }
 
 impl Report {
@@ -183,6 +198,11 @@ impl Report {
         }
         for note in &mut self.notes {
             *note = redact(note);
+        }
+        for item in &mut self.inventory {
+            for text in item.findings.iter_mut().chain(&mut item.phrases) {
+                *text = redact(text);
+            }
         }
         self.probe = self.probe.as_deref().map(redact);
     }
@@ -308,6 +328,8 @@ mod tests {
             checks: vec![check],
             summary: Summary::default(),
             notes: vec![format!("note {secret}")],
+            verified_at: None,
+            inventory: Vec::new(),
         };
         report.redact();
         let json = report.to_json();
