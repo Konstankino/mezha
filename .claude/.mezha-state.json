@@ -1,0 +1,9 @@
+{
+  "state_version": 1,
+  "hook_protocol": 2,
+  "spec": "sha256:ad920e0fb80d82215bf7e1864500cdb031fd2d959f837a6fcf7f7ce2b0500d86",
+  "files": {
+    ".claude/agents/implementer.md": "sha256:16767550b571d2643d6a26f480809548221777dedaab7af1429677ad2b5c03e8",
+    ".claude/settings.json": "sha256:7f419d9891efa6f28b46c7d00bfd56ff0bf6031417a26fcf41d85b600d470a3d"
+  }
+}
