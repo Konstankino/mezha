@@ -1768,3 +1768,49 @@ fn ast_inventory_a_pinned_skill_that_changes_fails() {
         detail(&r, "inventory")
     );
 }
+
+#[test]
+fn ast_inventory_a_skill_changed_since_its_eval_warns() {
+    let f = Fixture::new("", GITHUB);
+    let with_skill = format!(
+        "{}\n[skill.fmt]\npreset = \"command\"\ndescription = \"Formats code.\"\n",
+        spec("")
+    );
+    fs::create_dir_all(f.root.join("mezha/skills")).unwrap();
+    fs::write(f.root.join("mezha/skills/fmt.md"), "Run the formatter.\n").unwrap();
+    f.compile(&with_skill);
+    let skill_md = fs::read_to_string(f.root.join(".claude/skills/fmt/SKILL.md")).unwrap();
+    let store = mezha_memory::metrics_dir(&f.home, &f.root);
+    fs::create_dir_all(&store).unwrap();
+    let row = |stamp: &str, sha: &str| {
+        json!({"v": 1, "skill": "fmt", "stamp": stamp, "skill_sha": sha}).to_string()
+    };
+    fs::write(
+        store.join("skill-evals.jsonl"),
+        format!(
+            "{}\n{}\n",
+            row("20270101T000000Z", "sha256:old"),
+            row(
+                "20270102T000000Z",
+                &mezha_render::state::fingerprint(&skill_md)
+            )
+        ),
+    )
+    .unwrap();
+    assert_eq!(status(&f.verify(), "inventory"), Status::Pass);
+
+    fs::write(
+        f.root.join("mezha/skills/fmt.md"),
+        "Run the formatter twice.\n",
+    )
+    .unwrap();
+    f.compile(&with_skill);
+    let r = f.verify();
+    assert_eq!(status(&r, "inventory"), Status::Warn);
+    assert!(
+        detail(&r, "inventory")
+            .contains("skill `fmt` changed since its last eval (20270102T000000Z)"),
+        "{}",
+        detail(&r, "inventory")
+    );
+}

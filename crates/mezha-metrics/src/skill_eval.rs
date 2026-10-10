@@ -289,6 +289,21 @@ pub struct EvalRow {
     pub duration_ms: u64,
     pub claude_code: String,
     pub failure: Option<String>,
+    /// Fingerprint (`sha256:...`) of the SKILL.md the run had, so a result
+    /// is tied to the skill it measured; absent in older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_sha: Option<String>,
+    /// The model the eval asked for; absent means Claude Code's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Tools Claude called while the skill was loaded, by name (`Bash` for
+    /// any command), first use first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_used: Vec<String>,
+    /// Those the skill's `allowed_tools` doesn't declare; `Bash outside
+    /// its scopes` for a command no `Bash(...)` entry matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undeclared_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -373,6 +388,11 @@ pub struct Summary {
     pub cost_usd: f64,
     /// Fewer repeats than [`MIN_REPEAT_FOR_CLAIMS`].
     pub too_few: bool,
+    /// Tools used while the skill was loaded that its `allowed_tools`
+    /// doesn't declare, with the number of runs that used each.
+    pub undeclared: BTreeMap<String, u32>,
+    /// Runs in which the skill was loaded, and so could be compared.
+    pub loaded_runs: u32,
 }
 
 /// The summary of one eval (rows with the same stamp and skill).
@@ -387,6 +407,10 @@ pub fn summarize(rows: &[EvalRow]) -> Summary {
     for row in rows {
         s.cost_usd += row.cost_usd;
         s.repeat = s.repeat.max(row.repeat + 1);
+        s.loaded_runs += u32::from(row.loaded);
+        for tool in &row.undeclared_tools {
+            *s.undeclared.entry(tool.clone()).or_default() += 1;
+        }
         match row.kind {
             Kind::Trigger => {
                 let n = trigger_number(&row.case);
@@ -553,8 +577,32 @@ pub fn markdown(s: &Summary, prompts: &[String], trigger_turns: u32) -> String {
         }
         out.push('\n');
     }
+    if s.loaded_runs > 0 {
+        out.push_str("## Manifest\n\n");
+        if s.undeclared.is_empty() {
+            out.push_str("While the skill was loaded, Claude called only tools its `allowed_tools` declares.\n\n");
+        } else {
+            let list: Vec<String> = s
+                .undeclared
+                .iter()
+                .map(|(tool, runs)| {
+                    let outside = if reaches_outside(tool) { " ✗" } else { "" };
+                    format!("{tool}{outside} ({runs} of {} runs)", s.loaded_runs)
+                })
+                .collect();
+            out.push_str(&format!(
+                "While the skill was loaded, Claude called tools its `allowed_tools` doesn't declare: {}. Declare what the skill needs, or find out why it reached for the rest; ✗ marks tools that reach outside the sandbox (OWASP AST03, AST04).\n\n",
+                list.join(", ")
+            ));
+        }
+    }
     out.push_str(&format!("Cost: ${:.2}.\n", s.cost_usd));
     out
+}
+
+/// Tools that reach outside the sandbox.
+pub fn reaches_outside(tool: &str) -> bool {
+    matches!(tool, "WebFetch" | "WebSearch") || tool.starts_with("mcp__")
 }
 
 /// A percentage, or "n/a".
@@ -731,6 +779,10 @@ prompt = "p"
             duration_ms: 1000,
             claude_code: "2.1.285".into(),
             failure: None,
+            skill_sha: None,
+            model: None,
+            tools_used: Vec::new(),
+            undeclared_tools: Vec::new(),
         }
     }
 

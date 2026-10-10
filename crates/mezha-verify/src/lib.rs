@@ -134,6 +134,12 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         found.walk_outside(ctx, &layers);
     }
     found.digests();
+    let evals = match (&ctx.home, opts.project_only) {
+        (Some(home), false) => {
+            checks::inventory::last_evals(&mezha_memory::metrics_dir(home, &ctx.root))
+        }
+        _ => Default::default(),
+    };
 
     let checks = vec![
         sandbox.check,
@@ -145,7 +151,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         protection,
         checks::dreamer::check(ctx, &spec, opts),
         checks::bodies::check(&found),
-        checks::inventory::check(&found, &spec),
+        checks::inventory::check(&found, &spec, &rendered, &evals),
         checks::plugin::check(ctx, opts),
     ];
     let mut notes = Vec::new();

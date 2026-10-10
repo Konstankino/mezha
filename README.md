@@ -560,10 +560,17 @@ reject = ['unwrap\(\)']        # and none of these
   stops: a user or plugin skill shares its name.
 - `--only triggers` or `--only tasks` runs one kind, for instance while you
   work on a description.
+- **Manifest.** Once the skill has loaded, every tool Claude calls is
+  checked against the skill's `allowed_tools`: a tool it doesn't list, or a
+  Bash command none of its `Bash(...)` scopes matches. The report's
+  Manifest section lists them and marks those that reach outside the
+  sandbox (WebFetch, WebSearch, MCP tools).
 
 mezha prints the most the eval can cost and asks first (`--yes` skips the
-question). Rows go to `skill-evals.jsonl` in the metrics store (counts and
-a hash of each prompt, never its text); the report and each task's final
+question). Rows go to `skill-evals.jsonl` in the metrics store (counts, a
+hash of each prompt, never its text, and the fingerprint of the `SKILL.md`
+measured, the model asked for and the tools used; `mezha verify` warns when
+a skill has changed since its last eval); the report and each task's final
 message and diff go to `~/.mezha/metrics/<repo>/skill-<skill>-<time>/`.
 `mezha metrics` shows the latest eval of each skill. Below `--repeat 3` the
 report claims no difference between the variants. See

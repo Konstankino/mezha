@@ -9,12 +9,41 @@
 //! Plugin skills are namespaced (`plugin:skill`), and a project agent beats
 //! a personal one, so neither can shadow the project's.
 
+use std::collections::BTreeMap;
+
+use mezha_render::Rendered;
+use mezha_render::state::fingerprint;
 use mezha_spec::Spec;
 
 use crate::inventory::{Inventory, ItemKind, Source};
 use crate::report::{Check, Findings, Kind};
 
-pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
+/// The latest skill eval of each skill, as (stamp, SKILL.md fingerprint).
+pub type LastEvals = BTreeMap<String, (String, String)>;
+
+/// Reads `skill-evals.jsonl`: for each skill, the newest row that records
+/// the SKILL.md it measured.
+pub fn last_evals(store: &std::path::Path) -> LastEvals {
+    let mut last = LastEvals::new();
+    let text = std::fs::read_to_string(store.join("skill-evals.jsonl")).unwrap_or_default();
+    for row in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+    {
+        let field = |k: &str| row.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let (Some(skill), Some(stamp), Some(sha)) =
+            (field("skill"), field("stamp"), field("skill_sha"))
+        else {
+            continue;
+        };
+        if last.get(&skill).is_none_or(|(s, _)| *s < stamp) {
+            last.insert(skill, (stamp, sha));
+        }
+    }
+    last
+}
+
+pub fn check(inventory: &Inventory, spec: &Spec, rendered: &Rendered, evals: &LastEvals) -> Check {
     let check = Check::new(
         "inventory",
         "every skill that loads is reviewed",
@@ -93,6 +122,18 @@ pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
             f.warn(
                 format!("policy.external_skills lists `{name}`, which doesn't load here"),
                 Some("Remove it, or install the skill.".into()),
+            );
+        }
+    }
+    // An eval's results describe the text it ran (OWASP AST08).
+    for (name, (stamp, sha)) in evals {
+        let path = format!(".claude/skills/{name}/SKILL.md");
+        if let Some(text) = rendered.files.get(&path)
+            && fingerprint(text) != *sha
+        {
+            f.warn(
+                format!("skill `{name}` changed since its last eval ({stamp}), so those results describe the old text"),
+                Some(format!("Run `mezha skill eval {name}`.")),
             );
         }
     }

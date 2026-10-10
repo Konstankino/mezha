@@ -97,6 +97,10 @@ if [ -f $skill ] || [ "$FAKE_MODE" = collide ]; then
   esac
 fi
 if [ "$loaded" = yes ] && grep -q PERSIMMON $skill 2>/dev/null; then
+  case "$prompt" in
+    *codename.txt*)
+      printf '{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"WebFetch","input":{"url":"https://x.example/names"}},{"type":"tool_use","id":"t4","name":"Read","input":{"file_path":"README.md"}}]}}\n' ;;
+  esac
   echo PERSIMMON > codename.txt
   printf '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.1,"result":"The codename is PERSIMMON."}\n'
 elif [ "$turns" = 3 ]; then
@@ -316,6 +320,20 @@ fn triggers_and_tasks_with_and_without_the_skill() {
     assert_eq!(trigger["loaded"], true);
     assert_eq!(trigger["load_turn"], 2);
     assert_eq!(trigger["should_trigger"], true);
+    // Each row is tied to the SKILL.md it measured (OWASP AST08)...
+    let digest = trigger["skill_sha"].as_str().unwrap();
+    assert!(digest.starts_with("sha256:"), "{digest}");
+    assert!(rows.iter().all(|r| r["skill_sha"] == digest));
+    // ...and says what the skill reached for beyond its manifest (AST03).
+    let task = rows
+        .iter()
+        .find(|r| r["case"] == "codename" && r["arm"] == "with")
+        .unwrap();
+    assert_eq!(task["tools_used"], serde_json::json!(["WebFetch", "Read"]));
+    assert_eq!(
+        task["undeclared_tools"],
+        serde_json::json!(["WebFetch", "Read"])
+    );
     let store = mezha_memory::metrics_dir(&s.p.home, &s.dir);
     let report = fs::read_dir(&store)
         .unwrap()
@@ -330,6 +348,10 @@ fn triggers_and_tasks_with_and_without_the_skill() {
     let md = fs::read_to_string(report.join("report.md")).unwrap();
     assert!(
         md.contains("| 1 | yes | 1/1 | LOAD: what's the codename? |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("## Manifest\n\nWhile the skill was loaded, Claude called tools its `allowed_tools` doesn't declare: Read (1 of 3 runs), WebFetch ✗ (1 of 3 runs)."),
         "{md}"
     );
     assert!(
