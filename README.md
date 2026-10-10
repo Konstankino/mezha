@@ -292,9 +292,9 @@ memory = { scope = "project" }
   (zero-width, bidi controls, tag characters), which could make a
   description read one way to you and another to Claude.
 - Claude reads a body as instructions, so compile scans it: hidden
-  characters, secrets, chat-template tokens, remote images, raw HTML
-  (comments included) and, in a skill, `` !`cmd` `` or a ```` ```! ```` fence
-  refuse it. Phrases that read like instructions to a model, and links to
+  characters, secrets, chat-template tokens, remote images and raw HTML
+  (comments included) outside code, and, in a skill, `` !`cmd` `` or a
+  ```` ```! ```` fence refuse it. Phrases that read like instructions to a model, and links to
   other hosts (whose content can change after you review the body), are
   warnings: copy what Claude needs into the body instead of linking it.
 - Agent, skill, rule or command files under `.claude/` that mezha doesn't

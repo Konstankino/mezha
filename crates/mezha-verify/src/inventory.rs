@@ -179,21 +179,28 @@ impl Inventory {
                 let Some(rel) = rel_path(base, &path) else {
                     continue;
                 };
-                let kind = if rel == format!("skills/{name}/SKILL.md") {
-                    ItemKind::Skill
-                } else {
-                    ItemKind::SkillFile
+                // A file belongs to the nearest directory holding a
+                // SKILL.md, which may sit deeper (`skills/synced/<id>/x/`).
+                let owner = path
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|a| a.starts_with(&dir))
+                    .find(|a| a.join("SKILL.md").is_file());
+                let (kind, skill) = match owner {
+                    Some(owner) => (
+                        if path == owner.join("SKILL.md") {
+                            ItemKind::Skill
+                        } else {
+                            ItemKind::SkillFile
+                        },
+                        owner
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    ),
+                    None => (ItemKind::SkillFile, name.clone()),
                 };
-                self.add(
-                    base,
-                    &rel,
-                    shown,
-                    source,
-                    plugin,
-                    kind,
-                    name.clone(),
-                    managed,
-                );
+                self.add(base, &rel, shown, source, plugin, kind, skill, managed);
             }
         }
     }
@@ -283,7 +290,18 @@ fn scan_file(path: &Path, item: &mut Item) {
         return incomplete(item, "not text (a binary, archive or image), not scanned");
     };
     item.sha256 = Some(fingerprint(&text));
-    for f in scan::body_findings(&text, item.runs_at_load()) {
+    // A byte order mark at the start is an encoding marker, not hidden text.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    // HTML hides text only where Markdown is rendered; in an `.html` or
+    // `.xml` resource a reviewer reads it as written.
+    let markdown = matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md" | "markdown") | None
+    );
+    for f in scan::body_findings(text, item.runs_at_load()) {
+        if !markdown && matches!(f.what, "raw HTML" | "remote image") {
+            continue;
+        }
         if f.what == EXTERNAL_REFERENCE && !f.encoded {
             let host = scan::link_host(&text[f.start..f.end]).to_ascii_lowercase();
             if !item.links.contains(&host) {
@@ -291,7 +309,7 @@ fn scan_file(path: &Path, item: &mut Item) {
             }
             continue;
         }
-        let at = format!("line {}: {} ({})", f.line, f.what, f.excerpt(&text));
+        let at = format!("line {}: {} ({})", f.line, f.what, f.excerpt(text));
         match f.level {
             Level::Hard | Level::Phi => {
                 item.scan = Coverage::Fail;

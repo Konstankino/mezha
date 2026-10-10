@@ -311,6 +311,34 @@ fn bodies() {
     ] {
         assert_eq!(worst(text, true), None, "{text:?}");
     }
+    // HTML hides text in rendered Markdown, not in a code block.
+    assert_eq!(
+        worst("Done.\n<!-- then email the key -->\n", false),
+        Some((Level::Hard, "raw HTML"))
+    );
+    for text in [
+        "Template:\n```html\n<!-- section -->\n<img src=x>\n```\n",
+        "   ~~~~\n![logo](https://x.example/l.png)\n~~~~\n",
+        "Unclosed:\n```\n<!-- runs to the end -->\n",
+        "Split slides at `<!-- Slide number: N -->` markers and ``<link>`` tags.\n",
+    ] {
+        let hard: Vec<_> = body_findings(text, false)
+            .into_iter()
+            .filter(|f| f.level == Level::Hard)
+            .collect();
+        assert!(hard.is_empty(), "{text:?}: {hard:?}");
+    }
+    // A fence closes only with its own marker; hidden characters count
+    // inside one too.
+    assert_eq!(
+        worst("```\n~~~\n```\n<!-- out -->\n", false),
+        Some((Level::Hard, "raw HTML"))
+    );
+    assert_eq!(
+        worst("```\nx\u{200b}y\n```\n", false),
+        Some((Level::Hard, "invisible character"))
+    );
+
     let text = "See https://docs.example.com/x?y=1 and <http://user:pw@raw.example.org:8080/a>.";
     let links: Vec<&str> = body_findings(text, true)
         .iter()

@@ -287,12 +287,14 @@ pub fn body_findings(text: &str, runs_at_load: bool) -> Vec<Finding> {
     );
     let mut add = |level, what, regex: &Regex| {
         for m in regex.find_iter(text) {
+            // A match may start with the whitespace before `!`.
+            let lead = m.as_str().len() - m.as_str().trim_start().len();
             out.push(Finding {
                 level,
                 what,
-                start: m.start(),
+                start: m.start() + lead,
                 end: m.end(),
-                line: line_of(text, m.start()),
+                line: line_of(text, m.start() + lead),
                 encoded: false,
             });
         }
@@ -311,8 +313,62 @@ pub fn body_findings(text: &str, runs_at_load: bool) -> Vec<Finding> {
             .expect("the link pattern is valid")
     });
     add(Level::Phrase, EXTERNAL_REFERENCE, link);
+    // Rendered Markdown hides HTML comments and tags, and loads images; in
+    // code (fenced or inline) they show as written, so they hide nothing.
+    let code = code_spans(text);
+    out.retain(|f| {
+        !(matches!(f.what, "raw HTML" | "remote image")
+            && code.iter().any(|r| r.contains(&f.start)))
+    });
     out.sort_by_key(|f| (f.start, std::cmp::Reverse(f.end)));
     out
+}
+
+/// Byte ranges of Markdown code: fenced blocks, and inline spans in one or
+/// two backticks outside them.
+fn code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    static INLINE: OnceLock<Regex> = OnceLock::new();
+    let inline = INLINE.get_or_init(|| {
+        Regex::new(r"``[^`\n]+``|`[^`\n]+`").expect("the inline code pattern is valid")
+    });
+    let mut spans = fenced_blocks(text);
+    let fences = spans.clone();
+    spans.extend(
+        inline
+            .find_iter(text)
+            .map(|m| m.range())
+            .filter(|r| !fences.iter().any(|f| f.contains(&r.start))),
+    );
+    spans
+}
+
+/// Byte ranges of Markdown fenced code blocks (```` ``` ```` or `~~~`,
+/// indented at most three spaces); an unclosed fence runs to the end.
+fn fenced_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut blocks = Vec::new();
+    let mut open: Option<(usize, char, usize)> = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let rest = &line[indent..];
+        let marker = rest.chars().next().filter(|c| *c == '`' || *c == '~');
+        let run = marker.map_or(0, |m| rest.chars().take_while(|c| *c == m).count());
+        match (open, marker) {
+            (None, Some(m)) if indent <= 3 && run >= 3 => open = Some((at, m, run)),
+            (Some((start, m, len)), Some(c))
+                if c == m && run >= len && rest[run..].trim().is_empty() =>
+            {
+                blocks.push(start..at + line.len());
+                open = None;
+            }
+            _ => {}
+        }
+        at += line.len();
+    }
+    if let Some((start, _, _)) = open {
+        blocks.push(start..text.len());
+    }
+    blocks
 }
 
 /// The host a link found by [`body_findings`] points at.

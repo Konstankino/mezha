@@ -1675,3 +1675,41 @@ fn ast_auto_memory_is_read_only_unless_the_spec_says_otherwise() {
     assert!(!settings.contains("claude/projects"));
     assert_eq!(status(&f.verify(), "settings-layers"), Status::Pass);
 }
+
+#[test]
+fn ast_inventory_reads_skills_as_claude_code_lays_them_out() {
+    let f = Fixture::new("", GITHUB);
+    // Synced skills sit a level deeper; resources aren't rendered Markdown.
+    let dir = f.home.join(".claude/skills/synced/abc123/report");
+    fs::create_dir_all(dir.join("references")).unwrap();
+    fs::write(dir.join("SKILL.md"), "Write the report.\n").unwrap();
+    fs::write(
+        dir.join("references/template.html"),
+        "<!-- section --><p>x</p>\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("references/notes.md"),
+        "Template:\n```\n<!-- repeat as needed -->\n```\n",
+    )
+    .unwrap();
+    fs::write(dir.join("references/schema.xsd"), "\u{feff}<xs:schema/>\n").unwrap();
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "bodies"),
+        Status::Pass,
+        "{}",
+        detail(&r, "bodies")
+    );
+    let skill = item(&r, "~/.claude/skills/synced/abc123/report/SKILL.md");
+    assert_eq!(
+        (skill.kind, skill.name.as_str()),
+        (mezha_verify::inventory::ItemKind::Skill, "report")
+    );
+    let resource = item(
+        &r,
+        "~/.claude/skills/synced/abc123/report/references/notes.md",
+    );
+    assert_eq!(resource.name, "report");
+    assert!(detail(&r, "inventory").contains("without review: report"));
+}
