@@ -1,0 +1,252 @@
+# A/B tasks for `mezha metrics --ab mezha/ab-tasks.toml --repeat 3`: each
+# task runs as the implementer agent, once with its project memory and once
+# with that memory emptied.
+#
+# The prompts are what a person would type. The checks also hold the
+# workspace's own conventions (fmt, clippy -D warnings, the tests, README),
+# which is where lessons in memory should show. Where a task names
+# behaviour, its check writes a test of its own into the crate, runs it and
+# removes it, or drives the built CLI in a scratch project.
+#
+# Checks run in srt with the project's sandbox. They skip the mezha-verify
+# integration tests (boundary.rs, probe.rs): those bind local listeners,
+# which the sandbox refuses, so they fail there with or without memory.
+#
+# Cost: 8 tasks x 2 variants x --repeat sessions, each at most budget_usd.
+# With --repeat 3 that is 48 sessions, at most $96.
+
+[ab]
+model = "sonnet"
+budget_usd = 2.0
+max_turns = 60
+timeout_minutes = 30
+
+[[task]]
+name = "since-weeks"
+prompt = "Let --since accept weeks too, like 2w."
+agent = "implementer"
+check = '''
+set -e
+t=crates/mezha-memory/tests/ab_since_weeks.rs
+trap 'rm -f "$t"' EXIT
+cat > "$t" <<'EOF'
+use mezha_memory::time::parse_since;
+
+const NOW: i64 = 1_800_000_000;
+const DAY: i64 = 86_400;
+
+#[test]
+fn weeks() {
+    assert_eq!(parse_since("1w", NOW), Ok(NOW - 7 * DAY));
+    assert_eq!(parse_since("2w", NOW), Ok(NOW - 14 * DAY));
+    assert_eq!(parse_since("7d", NOW), Ok(NOW - 7 * DAY));
+    assert!(parse_since("0w", NOW).is_err());
+    assert!(parse_since("w", NOW).is_err());
+    let error = parse_since("soon", NOW).unwrap_err();
+    assert!(error.contains("2w"), "the error lists weeks: {error}");
+}
+EOF
+cargo test -q -p mezha-memory --test ab_since_weeks
+rm -f "$t"
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "hf-token"
+prompt = "Hugging Face access tokens (hf_ and 34 letters or digits) should count as secrets in the memory scans."
+agent = "implementer"
+check = '''
+set -e
+t=crates/mezha-memory/tests/ab_hf_token.rs
+trap 'rm -f "$t"' EXIT
+cat > "$t" <<'EOF'
+use mezha_memory::scan::{Level, Scan, findings};
+
+#[test]
+fn hugging_face_tokens() {
+    let text = "download it with hf_AbCdEfGhIjKlMnOpQrStUvWxYz01234567 please";
+    let found = findings(text, Scan::default());
+    assert!(found.iter().any(|f| f.level == Level::Hard), "{found:?}");
+    for text in ["call hf_hub_download first", "hf_short", "the hf_ prefix"] {
+        assert!(findings(text, Scan::default()).is_empty(), "{text:?}");
+    }
+}
+EOF
+cargo test -q -p mezha-memory --test ab_hf_token
+rm -f "$t"
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "gate-inline-code"
+prompt = '''The approval gate lets python3 -c "import os; os.system('git push')" through. Make it catch gated commands in inline code run by python, node, perl and ruby, without blocking inline code that runs none.'''
+agent = "implementer"
+check = '''
+set -e
+t=crates/mezha-hooks/tests/ab_inline_code.rs
+trap 'rm -f "$t"' EXIT
+cat > "$t" <<'EOF'
+use mezha_hooks::matcher::scan;
+use mezha_spec::CommandPrefix;
+
+#[test]
+fn inline_code_is_scanned() {
+    let gates = [CommandPrefix::parse("git push").unwrap()];
+    for command in [
+        "python3 -c \"import os; os.system('git push')\"",
+        "python -c 'import os; os.system(\"git push origin main\")'",
+        "node -e \"require('child_process').execSync('git push')\"",
+        "perl -e 'system(\"git push\")'",
+        "ruby -e 'system(\"git push\")'",
+    ] {
+        assert!(scan(command, &gates).is_some(), "{command:?}");
+    }
+    for command in [
+        "python3 -c \"print('hello')\"",
+        "node -e \"console.log(1 + 1)\"",
+        "ruby -e 'puts 42'",
+    ] {
+        assert!(scan(command, &gates).is_none(), "{command:?}");
+    }
+}
+EOF
+cargo test -q -p mezha-hooks --test ab_inline_code
+rm -f "$t"
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "agent-color"
+prompt = "Let agents in mezha.toml set a color for Claude Code's agent list, and refuse colors Claude Code doesn't support."
+agent = "implementer"
+check = '''
+set -e
+w=$(mktemp -d)
+trap 'rm -rf "$w"' EXIT
+cargo build -q -p mezha
+m="$PWD/target/debug/mezha"
+project() {
+  mkdir "$w/$1"
+  "$m" init -p "$w/$1" >/dev/null
+  mkdir -p "$w/$1/mezha/agents"
+  echo 'Implement what you are asked.' > "$w/$1/mezha/agents/impl.md"
+  printf '\n[agent.impl]\ndescription = "Implements changes. Use for coding tasks."\ntools = ["Read"]\nrule_of_two = []\ncolor = "%s"\n' "$1" >> "$w/$1/mezha.toml"
+}
+project blue
+"$m" compile -p "$w/blue" >/dev/null
+grep -Eq '^color: "?blue"?$' "$w/blue/.claude/agents/impl.md"
+project chartreuse
+if "$m" compile -p "$w/chartreuse" > "$w/out" 2>&1; then
+  echo "color = \"chartreuse\" was accepted"
+  exit 1
+fi
+grep -q chartreuse "$w/out"
+grep -q color README.md
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "diff-exit-code"
+prompt = "Add --exit-code to mezha diff, like git diff --exit-code, so CI can tell when someone changed mezha.toml without running mezha compile."
+agent = "implementer"
+check = '''
+set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cargo build -q -p mezha
+m="$PWD/target/debug/mezha"
+"$m" init -p "$d" >/dev/null
+"$m" compile -p "$d" >/dev/null
+"$m" diff --exit-code -p "$d" >/dev/null
+sed 's/^egress_allow = \[\]/egress_allow = ["crates.io"]/' "$d/mezha.toml" > "$d/t"
+mv "$d/t" "$d/mezha.toml"
+"$m" diff -p "$d" >/dev/null
+code=0
+"$m" diff --exit-code -p "$d" >/dev/null || code=$?
+test "$code" -eq 1
+grep -q -- '--exit-code' README.md
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "codeberg-forge"
+prompt = "Treat Codeberg as a forge like GitHub, GitLab and Bitbucket: sandboxed commands shouldn't reach codeberg.org unless egress_allow lets them."
+agent = "implementer"
+check = '''
+set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cargo build -q -p mezha
+m="$PWD/target/debug/mezha"
+"$m" init -p "$d" >/dev/null
+"$m" compile -p "$d" >/dev/null
+grep -q '"codeberg.org"' "$d/.claude/settings.json"
+sed 's/^egress_allow = \[\]/egress_allow = ["codeberg.org"]/' "$d/mezha.toml" > "$d/t"
+mv "$d/t" "$d/mezha.toml"
+"$m" compile -p "$d" >/dev/null
+test "$(grep -c '"codeberg.org"' "$d/.claude/settings.json")" -eq 1
+grep -qi codeberg README.md
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "duplicate-entries"
+prompt = "Warn when mezha.toml lists the same entry twice in egress_allow, deny_reads or permissions_ask."
+agent = "implementer"
+check = '''
+set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cargo build -q -p mezha
+m="$PWD/target/debug/mezha"
+"$m" init -p "$d" >/dev/null
+sed -e 's/^egress_allow = \[\]/egress_allow = ["crates.io", "crates.io"]/' \
+    -e 's/^permissions_ask = \["git push"\]/permissions_ask = ["git push", "git push"]/' \
+    -e 's/^deny_reads = .*/deny_reads = [".env", "*.pem", ".env"]/' \
+    "$d/mezha.toml" > "$d/t"
+mv "$d/t" "$d/mezha.toml"
+"$m" compile -p "$d" > "$d/out" 2>&1
+grep -q 'policy.egress_allow' "$d/out"
+grep -q 'policy.permissions_ask' "$d/out"
+grep -q 'policy.deny_reads' "$d/out"
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
+
+[[task]]
+name = "approve-status-exit"
+prompt = "Make mezha approve --status exit 1 when there is no active approval, so a script can test for one."
+agent = "implementer"
+check = '''
+set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cargo build -q -p mezha
+code=0
+./target/debug/mezha approve --status -p "$d" >/dev/null || code=$?
+test "$code" -eq 1
+cargo fmt --all --check
+cargo clippy -q --workspace --all-targets -- -D warnings
+cargo test -q --workspace --exclude mezha-verify
+cargo test -q -p mezha-verify --lib
+'''
