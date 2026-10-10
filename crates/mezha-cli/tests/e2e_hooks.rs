@@ -428,3 +428,56 @@ fn an_unwritable_audit_log_blocks() {
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("couldn't write the audit log"), "{err}");
 }
+
+#[test]
+fn fetch_allow_reaches_the_gate() {
+    let p = Project::new();
+    git(&p.root, &["init", "-q"]);
+    p.write_spec(&format!("{SPEC}fetch_allow = [\"docs.rs\"]\n"));
+    let out = p.mezha(&["compile"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let settings: Value = serde_json::from_str(&p.read(".claude/settings.json")).unwrap();
+    let command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        command.ends_with(" --fetch-only --fetch 'docs.rs' || exit 2"),
+        "{command}"
+    );
+    assert!(
+        settings["env"]
+            .get("CLAUDE_CODE_DISABLE_WEB_FETCH")
+            .is_none()
+    );
+    let bin_dir = Path::new(common::BIN).parent().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    let home = p.home.to_str().unwrap();
+    let root = p.root.to_str().unwrap();
+    let fire = |url: &str| {
+        let event = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "WebFetch",
+            "tool_input": { "url": url, "prompt": "x" },
+        });
+        let out = bash(
+            command,
+            &p.root,
+            &[
+                ("HOME", home),
+                ("PATH", &path),
+                ("CLAUDE_PROJECT_DIR", root),
+            ],
+            event.to_string().as_bytes(),
+        );
+        out.status.code().unwrap()
+    };
+    assert_eq!(fire("https://docs.rs/x"), 0);
+    assert_eq!(fire("https://evil.example/?k=v"), 2);
+
+    // None at all: Claude Code is told to leave WebFetch out too.
+    p.write_spec(&format!("{SPEC}fetch_allow = []\n"));
+    let out = p.mezha(&["compile"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let settings: Value = serde_json::from_str(&p.read(".claude/settings.json")).unwrap();
+    assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_WEB_FETCH"], "1");
+}

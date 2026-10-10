@@ -24,6 +24,9 @@ deny_reads = [".env", "*.pem", "*.key"]
 # warns about any other skill that loads here, and fails when a pinned one
 # changes.
 external_skills = []
+# Hosts the WebFetch tool may reach (`*.example.com` for subdomains), [] for
+# none. Left out, WebFetch reaches any host and `mezha compile` warns.
+# fetch_allow = ["docs.rs"]
 
 # [memory]
 # dream_schedule = "manual"    # nightly | manual | cron; see `mezha dream --schedule`

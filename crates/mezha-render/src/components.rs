@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use mezha_memory::scan::{self, EXTERNAL_REFERENCE, Level};
-use mezha_spec::{Agent, BashPattern, Rule, Scope, Skill, Spec, is_unscoped_bash, parse_tool};
+use mezha_spec::{
+    Agent, BashPattern, HostPattern, Rule, Scope, Skill, Spec, is_unscoped_bash, parse_tool,
+};
 use serde_json::{Value, json};
 
 use crate::frontmatter;
@@ -25,22 +27,30 @@ pub struct Components {
 
 pub fn render(spec: &Spec, root: &Path) -> Components {
     let mut out = Components::default();
+    let fetch = spec.fetch_allow().ok().flatten();
+    let fetch = fetch.as_deref();
     for (name, agent) in &spec.agent {
         let path = format!(".claude/agents/{name}.md");
-        let result = read_body(root, &agent.prompt_path(name), false, &mut out.warnings)
-            .and_then(|body| agent_file(spec, name, agent, &body));
+        let result = read_body(
+            root,
+            &agent.prompt_path(name),
+            false,
+            fetch,
+            &mut out.warnings,
+        )
+        .and_then(|body| agent_file(spec, name, agent, &body));
         out.add(path, result);
     }
     for (name, skill) in &spec.skill {
         let path = format!(".claude/skills/{name}/SKILL.md");
-        let result = read_body(root, &skill.body_path(name), true, &mut out.warnings)
+        let result = read_body(root, &skill.body_path(name), true, fetch, &mut out.warnings)
             .and_then(|body| skill_file(name, skill, &body));
         out.add(path, result);
     }
     for (name, rule) in &spec.rule {
         let path = format!(".claude/rules/{name}.md");
-        let result =
-            read_body(root, &rule.body_path(name), false, &mut out.warnings).and_then(|body| {
+        let result = read_body(root, &rule.body_path(name), false, fetch, &mut out.warnings)
+            .and_then(|body| {
                 if let Some(max) = rule.max_lines
                     && body.lines().count() > max as usize
                 {
@@ -74,6 +84,7 @@ fn read_body(
     root: &Path,
     rel: &str,
     runs_at_load: bool,
+    fetch: Option<&[HostPattern]>,
     warnings: &mut Vec<String>,
 ) -> Result<String, String> {
     crate::write::fence(root, rel).map_err(|e| e.to_string())?;
@@ -101,19 +112,22 @@ fn read_body(
     if text.trim().is_empty() {
         warnings.push(format!("{rel} is empty"));
     }
-    scan_body(rel, &text, runs_at_load, warnings)?;
+    scan_body(rel, &text, runs_at_load, fetch, warnings)?;
     Ok(text)
 }
 
 /// Claude reads a body as instructions, so what the scan calls hard (hidden
 /// characters, secrets, chat-template tokens, remote images, raw HTML and,
-/// in a skill, shell run at load) refuses it, and phrases and links are
-/// warnings (OWASP AST01, AST04, AST05, AST08). Advisory: patterns miss
+/// in a skill, shell run at load) refuses it, and phrases are warnings
+/// (OWASP AST01, AST04, AST08). A link to a host `fetch_allow` doesn't
+/// list refuses it too, since WebFetch couldn't follow it; without
+/// `fetch_allow`, links are warnings (AST05). Advisory: patterns miss
 /// things, so the boundary is still the review of every body change.
 fn scan_body(
     rel: &str,
     text: &str,
     runs_at_load: bool,
+    fetch: Option<&[HostPattern]>,
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut hard = Vec::new();
@@ -132,11 +146,25 @@ fn scan_body(
             Level::Phrase => warnings.push(format!("{at}: reads like an instruction to a model")),
         }
     }
-    if !hosts.is_empty() {
-        warnings.push(format!(
+    match fetch {
+        Some(allowed) => {
+            let outside: Vec<&str> = hosts
+                .iter()
+                .copied()
+                .filter(|h| !allowed.iter().any(|a| a.matches(h)))
+                .collect();
+            if !outside.is_empty() {
+                hard.push(format!(
+                    "{rel} links to {}, which policy.fetch_allow doesn't list (copy what Claude needs into the body, or list the host)",
+                    outside.join(", ")
+                ));
+            }
+        }
+        None if !hosts.is_empty() => warnings.push(format!(
             "{rel} links to {}: Claude may fetch and follow what is there, which can change after review; copy what it needs into the body",
             hosts.join(", ")
-        ));
+        )),
+        None => {}
     }
     if hard.is_empty() {
         Ok(())

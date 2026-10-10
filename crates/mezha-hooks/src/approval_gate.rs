@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use mezha_broker::approvals;
-use mezha_spec::CommandPrefix;
+use mezha_spec::{CommandPrefix, HostPattern};
 use serde_json::{Map, Value};
 
 use crate::audit;
@@ -26,7 +26,12 @@ const ADVISORY: &str = "(mezha approval gate: advisory. The boundary is the sand
 
 /// Decides, then records the decision in the audit log. A call that can't
 /// be recorded is blocked too (fail-closed).
-pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
+pub fn run(
+    gates: &[CommandPrefix],
+    fetch: Option<&[HostPattern]>,
+    input: &[u8],
+    env: &Env,
+) -> Outcome {
     let event = std::str::from_utf8(input)
         .ok()
         .filter(|_| input.len() <= MAX_INPUT)
@@ -36,7 +41,7 @@ pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
             _ => None,
         })
         .unwrap_or_default();
-    let outcome = decide(gates, input, env);
+    let outcome = decide(gates, fetch, input, env);
     let Some(home) = mezha_broker::home_dir(|k| env.var(k).map(str::to_string)) else {
         return outcome;
     };
@@ -55,7 +60,12 @@ pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
     }
 }
 
-fn decide(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
+fn decide(
+    gates: &[CommandPrefix],
+    fetch: Option<&[HostPattern]>,
+    input: &[u8],
+    env: &Env,
+) -> Outcome {
     if input.len() > MAX_INPUT {
         return Outcome::block("mezha: hook input is too large to check");
     }
@@ -88,6 +98,12 @@ fn decide(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
         ));
     }
 
+    if tool == "WebFetch"
+        && let Some(hosts) = fetch
+    {
+        return gate_fetch(input, hosts);
+    }
+
     match input.and_then(|i| i.get("command")) {
         Some(Value::String(command)) => {
             gate_command(command, gates, env, &home, project.as_deref())
@@ -98,6 +114,54 @@ fn decide(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
         }
         None => Outcome::allow(),
     }
+}
+
+/// WebFetch may reach only the hosts `policy.fetch_allow` lists (OWASP
+/// AST05). A redirect to another host comes back as a new WebFetch call, so
+/// a chain of references stays inside the list too.
+fn gate_fetch(input: Option<&Map<String, Value>>, hosts: &[HostPattern]) -> Outcome {
+    let url = input.and_then(|i| i.get("url")).and_then(Value::as_str);
+    let Some(host) = url.and_then(url_host) else {
+        return Outcome::block(format!(
+            "mezha: WebFetch to `{}`: the host can't be read from the URL, so the call is blocked",
+            url.unwrap_or("").escape_debug()
+        ));
+    };
+    if hosts.iter().any(|h| h.matches(&host)) {
+        Outcome::allow()
+    } else {
+        let listed: Vec<String> = hosts.iter().map(ToString::to_string).collect();
+        Outcome::block(format!(
+            "mezha: WebFetch may reach only the hosts in policy.fetch_allow ({}), not `{host}`. Ask the user to add the host to mezha.toml if it is needed.",
+            if listed.is_empty() {
+                "none".to_string()
+            } else {
+                listed.join(", ")
+            }
+        ))
+    }
+}
+
+/// The host of an http(s) URL, lowercased, as a browser would read it:
+/// a backslash ends the authority like a slash, and userinfo and the port
+/// are dropped. Anything unusual (percent-encoding, spaces, non-ASCII) is
+/// refused rather than guessed at.
+pub(crate) fn url_host(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    let authority = rest.split(['/', '\\', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => host_port.split(':').next()?,
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let plain = host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == ':');
+    (!host.is_empty() && plain).then_some(host)
 }
 
 /// `CLAUDE_PROJECT_DIR`, else the event's `cwd`.
@@ -178,4 +242,36 @@ fn store_path<'a>(
             };
             within(&resolve(&path), &store)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_host;
+
+    #[test]
+    fn hosts_of_urls() {
+        let host = |u: &str| url_host(u);
+        assert_eq!(host("https://Docs.RS/x?y#z").as_deref(), Some("docs.rs"));
+        assert_eq!(
+            host("http://user:pw@a.example.com:8080/").as_deref(),
+            Some("a.example.com")
+        );
+        assert_eq!(host("https://[::1]:443/").as_deref(), Some("::1"));
+        // A backslash ends the authority, as in a browser.
+        assert_eq!(
+            host("https://evil.example\\@docs.rs/").as_deref(),
+            Some("evil.example")
+        );
+        assert_eq!(host("https://docs.rs.").as_deref(), Some("docs.rs"));
+        for bad in [
+            "ftp://docs.rs",
+            "docs.rs",
+            "https://",
+            "https://ev%2Eil.com/",
+            "https://dócs.rs",
+            "https://a b.com",
+        ] {
+            assert_eq!(host(bad), None, "{bad}");
+        }
+    }
 }

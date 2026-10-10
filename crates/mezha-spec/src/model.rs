@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::CommandPrefix;
+use crate::{CommandPrefix, HostPattern};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +73,9 @@ pub struct Policy {
     /// any other that loads, and fails when a pinned one changes (OWASP
     /// AST01, AST07, AST09).
     pub external_skills: Vec<String>,
+    /// Hosts the WebFetch tool may reach, as patterns like `egress_allow`'s;
+    /// `[]` for none. Absent leaves WebFetch unrestricted (OWASP AST05).
+    pub fetch_allow: Option<Vec<String>>,
 }
 
 impl Policy {
@@ -100,6 +103,7 @@ impl Default for Policy {
             permissions_ask: Vec::new(),
             deny_reads: Vec::new(),
             external_skills: Vec::new(),
+            fetch_allow: None,
         }
     }
 }
@@ -440,5 +444,14 @@ impl Spec {
             .iter()
             .map(|p| CommandPrefix::parse(p))
             .collect()
+    }
+
+    /// The hosts WebFetch may reach, when `[policy] fetch_allow` limits it.
+    pub fn fetch_allow(&self) -> Result<Option<Vec<HostPattern>>, String> {
+        self.policy
+            .fetch_allow
+            .as_ref()
+            .map(|hosts| hosts.iter().map(|h| HostPattern::parse(h)).collect())
+            .transpose()
     }
 }

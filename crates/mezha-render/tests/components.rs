@@ -275,6 +275,33 @@ fn bodies_are_scanned() {
 }
 
 #[test]
+fn links_must_stay_inside_fetch_allow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spec = "[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push\"]\nfetch_allow = [\"docs.rs\"]\n\
+                [skill.ship]\npreset = \"command\"\ndescription = \"Ship it.\"\n";
+    fs::write(root.join("mezha.toml"), spec).unwrap();
+    fs::create_dir_all(root.join("mezha/skills")).unwrap();
+    fs::write(
+        root.join("mezha/skills/ship.md"),
+        "See https://docs.rs/ship.\n",
+    )
+    .unwrap();
+    let r = render_dir(root);
+    assert!(r.problems.is_empty() && r.warnings.is_empty(), "{r:?}");
+    fs::write(
+        root.join("mezha/skills/ship.md"),
+        "See https://docs.rs/ship and https://pastebin.example/raw/x.\n",
+    )
+    .unwrap();
+    let problems = render_dir(root).problems.join("\n");
+    assert!(
+        problems.contains("links to pastebin.example, which policy.fetch_allow doesn't list"),
+        "{problems}"
+    );
+}
+
+#[test]
 fn removing_a_skill_removes_its_file_and_its_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

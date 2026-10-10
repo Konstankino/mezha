@@ -6,6 +6,7 @@
 
 mod bash_pattern;
 pub mod cron;
+mod host;
 mod model;
 mod names;
 mod prefix;
@@ -13,6 +14,7 @@ mod tools;
 mod validate;
 
 pub use bash_pattern::BashPattern;
+pub use host::{HostPattern, host_matches};
 pub use model::{
     Agent, AgentMemory, AutoMemory, BODY_DIR, Capability, DEFAULT_DREAM_BUDGET_USD,
     DEFAULT_DREAM_MAX_TURNS, DEFAULT_DREAM_MODEL, DreamPolicy, DreamSchedule, Effort, HumanGate,

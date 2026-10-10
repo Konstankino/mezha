@@ -34,6 +34,7 @@ name = "base"
 
 [policy]
 permissions_ask = ["git push"]
+fetch_allow = []
 "#;
 
 /// What every test agent needs besides the property under test.
@@ -295,7 +296,11 @@ fn policy_warnings() {
     assert!(!d.has_errors());
     assert_eq!(
         paths(&d, Severity::Warning),
-        ["policy.permissions_ask", "policy.sandbox"]
+        [
+            "policy.permissions_ask",
+            "policy.fetch_allow",
+            "policy.sandbox"
+        ]
     );
     let spec = parse("[project]\nname = \"p\"\n").unwrap();
     assert!(spec.policy.sandbox, "the sandbox is on by default");
@@ -528,4 +533,23 @@ fn skills_that_reach_out_without_asking_warn() {
         .map(|w| w.message.split('`').nth(1).unwrap())
         .collect();
     assert_eq!(reach, ["WebFetch", "mcp__tracker__create"]);
+}
+
+#[test]
+fn fetch_allow() {
+    // Absent: WebFetch reaches anything, which deserves a warning.
+    let open = BASE.replace("fetch_allow = []\n", "");
+    let d = check(&open);
+    assert_eq!(paths(&d, Severity::Warning), ["policy.fetch_allow"]);
+    assert!(d.0[0].message.contains("AST05"));
+    let d = check(&BASE.replace("[]", "[\"docs.rs\", \"*.example.com\", \"*\"]"));
+    assert!(d.0.is_empty(), "{:#?}", d.0);
+    let d = check(&BASE.replace(
+        "fetch_allow = []",
+        "fetch_allow = [\"https://docs.rs\", \"x.com:443\"]",
+    ));
+    assert_eq!(
+        paths(&d, Severity::Error),
+        ["policy.fetch_allow[0]", "policy.fetch_allow[1]"]
+    );
 }

@@ -150,7 +150,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         checks::hygiene::check(ctx, &spec, &rendered),
         protection,
         checks::dreamer::check(ctx, &spec, opts),
-        checks::bodies::check(&found),
+        checks::bodies::check(&found, &spec),
         checks::inventory::check(&found, &spec, &rendered, &evals),
         checks::plugin::check(ctx, opts),
     ];

@@ -298,16 +298,26 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
         return;
     };
     let mut wrong = Vec::new();
-    for (cmd, expect) in [
-        ("git push origin main", 2),
-        ("mezha approve --minutes 5", 2),
-        ("git status", 0),
-    ] {
+    let mut probes = vec![
+        ("Bash", "git push origin main", 2),
+        ("Bash", "mezha approve --minutes 5", 2),
+        ("Bash", "git status", 0),
+    ];
+    // With fetch_allow, WebFetch to a host outside it must be blocked.
+    if command.contains("--fetch-only") {
+        probes.push(("WebFetch", "https://mezha-verify.invalid/", 2));
+    }
+    for &(tool, cmd, expect) in &probes {
+        let input = if tool == "WebFetch" {
+            json!({ "url": cmd, "prompt": "x" })
+        } else {
+            json!({ "command": cmd })
+        };
         let event = json!({
             "session_id": "mezha-verify",
             "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": cmd },
+            "tool_name": tool,
+            "tool_input": input,
             "cwd": ctx.root,
         });
         let home = scratch.path().to_string_lossy().into_owned();
@@ -342,9 +352,12 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
             format!("the gate doesn't behave: {}", wrong.join(", ")),
             "Reinstall mezha and run `mezha compile`; if it persists, report a mezha bug.",
         );
-    } else if logged < 3 {
+    } else if logged < probes.len() {
         f.fail(
-            format!("the gate decided 3 calls but wrote {logged} audit record(s)"),
+            format!(
+                "the gate decided {} calls but wrote {logged} audit record(s)",
+                probes.len()
+            ),
             "Reinstall mezha and run `mezha compile`; if it persists, report a mezha bug.",
         );
     }

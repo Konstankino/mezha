@@ -371,3 +371,56 @@ fn a_call_that_cannot_be_recorded_is_blocked() {
         out.stderr
     );
 }
+
+#[test]
+fn webfetch_stays_inside_fetch_allow() {
+    let f = Fixture::new();
+    let argv = |fetch: &[&str]| -> Vec<String> {
+        let mut a: Vec<String> = ["approval-gate", "--protocol", &PROTOCOL.to_string()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if !fetch.is_empty() {
+            a.push("--fetch-only".into());
+        }
+        for host in fetch.iter().filter(|h| !h.is_empty()) {
+            a.extend(["--fetch".to_string(), host.to_string()]);
+        }
+        a
+    };
+    let fetch = |args: &[String], url: &str| {
+        let event = tool("WebFetch", json!({ "url": url, "prompt": "summarise" }));
+        run(args, event.to_string().as_bytes(), &f.env())
+    };
+    let limited = argv(&["docs.rs", "*.python.org"]);
+    assert_eq!(fetch(&limited, "https://docs.rs/serde"), Outcome::allow());
+    assert_eq!(
+        fetch(&limited, "https://docs.python.org/3/"),
+        Outcome::allow()
+    );
+    for url in [
+        "https://evil.example/?k=secret",
+        "https://docs.rs.evil.example/",
+        "https://evil.example\\@docs.rs/",
+        "https://python.org/",
+        "file:///etc/passwd",
+        "not a url",
+    ] {
+        let out = fetch(&limited, url);
+        assert!(out.is_block(), "{url}: {out:?}");
+    }
+    let out = fetch(&limited, "https://evil.example/");
+    assert!(
+        out.stderr
+            .contains("policy.fetch_allow (docs.rs, *.python.org)"),
+        "{}",
+        out.stderr
+    );
+    // `fetch_allow = []`: nothing; no list: anything, as before.
+    assert!(fetch(&argv(&[""]), "https://docs.rs/").is_block());
+    assert_eq!(fetch(&argv(&[]), "https://evil.example/"), Outcome::allow());
+    // A list without --fetch-only means the command was edited.
+    let mut edited = argv(&[]);
+    edited.extend(["--fetch".to_string(), "docs.rs".to_string()]);
+    assert!(fetch(&edited, "https://docs.rs/").is_block());
+}

@@ -1,7 +1,7 @@
 //! `.claude/settings.json`, built as JSON values (never from text templates)
 //! and limited to keys Claude Code documents.
 
-use mezha_spec::{AutoMemory, CommandPrefix, Spec};
+use mezha_spec::{AutoMemory, CommandPrefix, HostPattern, Spec};
 use serde_json::{Map, Value, json};
 
 pub const SCHEMA_URL: &str = "https://json.schemastore.org/claude-code-settings.json";
@@ -87,22 +87,16 @@ pub const FORGE_WRITE_HOSTS: [&str; 7] = [
 ];
 
 /// Whether an `egress_allow` entry lets sandboxed commands reach `host`,
-/// matched like the sandbox proxy does: `example.com` only itself,
-/// `*.example.com` its subdomains, `*` everything. An entry limited to a
-/// port still covers the host, so denying it wouldn't take the port away.
+/// matched like the sandbox proxy does ([`mezha_spec::host_matches`]). An
+/// entry limited to a port still covers the host, so denying it wouldn't
+/// take the port away.
 fn allows(entry: &str, host: &str) -> bool {
-    let entry = entry.trim().to_ascii_lowercase();
+    let entry = entry.trim();
     let entry = match entry.rsplit_once(':') {
-        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h.to_string(),
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
         _ => entry,
     };
-    match entry.as_str() {
-        "*" => true,
-        e => match e.strip_prefix("*.") {
-            Some(suffix) => host.len() > suffix.len() + 1 && host.ends_with(&format!(".{suffix}")),
-            None => host == e,
-        },
-    }
+    mezha_spec::host_matches(entry, host)
 }
 
 /// The forge write hosts no `egress_allow` entry covers.
@@ -212,7 +206,7 @@ fn audit_hook() -> Value {
     })
 }
 
-pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
+pub fn settings(spec: &Spec, gates: &[CommandPrefix], fetch: Option<&[HostPattern]>) -> Value {
     let mut ask: Vec<String> = gates.iter().map(|g| format!("Bash({g} *)")).collect();
     ask.extend(
         ASK_EDITS
@@ -234,10 +228,15 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
     deny.extend(spec.policy.deny_reads.iter().map(|p| format!("Read({p})")));
     deny.extend(CREDENTIAL_FILES.iter().map(|&(p, dir)| read_rule(p, dir)));
 
-    let env: Map<String, Value> = GIT_GUARD_ENV
+    let mut env: Map<String, Value> = GIT_GUARD_ENV
         .iter()
         .map(|&(k, v)| (k.to_string(), Value::from(v)))
         .collect();
+    // No host may be fetched: Claude Code can leave WebFetch out entirely,
+    // and the gate blocks it either way.
+    if fetch.is_some_and(<[HostPattern]>::is_empty) {
+        env.insert("CLAUDE_CODE_DISABLE_WEB_FETCH".into(), Value::from("1"));
+    }
 
     let mut settings = json!({
         "$schema": SCHEMA_URL,
@@ -256,7 +255,7 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
             "PreToolUse": [{
                 "hooks": [{
                     "type": "command",
-                    "command": mezha_hooks::command_line(gates),
+                    "command": mezha_hooks::command_line(gates, fetch),
                     "shell": "bash",
                 }]
             }],

@@ -29,6 +29,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 | Git guard rail in `env` (no credential helper, no askpass) | *Advisory* | It closes accidental helper use, but a command can name a helper itself (`git -c credential.helper=...`). |
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
+| WebFetch allowlist (`policy.fetch_allow`) | Hook (fail-closed) | The gate reads the host from each WebFetch URL as a browser would and blocks any host the list doesn't name; a redirect to another host comes back as a new WebFetch call, which it checks too. With `fetch_allow = []` settings also tell Claude Code to leave WebFetch out. Links in bodies must stay inside the list. MCP tools that fetch and WebSearch aren't covered. Without the key WebFetch reaches anything, and compile warns. |
 | Repository config that runs code (`project-config` in verify) | Integrity | Settings that run a command, install plugins or point Claude's traffic elsewhere, and MCP servers from `.mcp.json`, all run outside the sandbox when a session starts. verify fails on them in the shared settings file and on any approval of every `.mcp.json` server, and warns about servers and about such settings in your local file. |
 | Reviewed skills only (`inventory` in verify) | Integrity | Claude Code prefers a personal skill to a project skill with the same name, so verify fails when one in `~/.claude/skills` shadows the project's. Personal and plugin skills not listed in `policy.external_skills` warn, and an agent may preload only skills the spec defines or lists. A listed skill pinned to its fingerprint (`notes@sha256:...`, as verify prints it) fails when any file in its directory changes. |
 | Audit log under `~/.mezha/audit` | Evidence (boundary on `~/.mezha`) | The gate records every call it decides before it runs, and a second hook records how it ended. Sandboxed commands can't write there and the file tools are denied, so an agent can't rewrite its own record; your own processes can, so it is evidence against the agent, not against you. A call that can't be recorded is blocked. See [Audit log](#audit-log). |
@@ -206,7 +207,9 @@ the command's own output in the tool result, not Claude's summary. Without
   - `enableAllProjectMcpServers: false`: each server in `.mcp.json` waits
     for your approval;
   - one `PreToolUse` hook on every tool: the approval gate, which also
-    writes the [audit log](#audit-log);
+    keeps WebFetch inside `policy.fetch_allow` and writes the
+    [audit log](#audit-log); with `fetch_allow = []`,
+    `CLAUDE_CODE_DISABLE_WEB_FETCH` in `env` as well;
   - `PostToolUse` and `PostToolUseFailure` hooks on every tool, which record
     how each call ended.
 - `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md` and
@@ -294,9 +297,11 @@ memory = { scope = "project" }
 - Claude reads a body as instructions, so compile scans it: hidden
   characters, secrets, chat-template tokens, remote images and raw HTML
   (comments included) outside code, and, in a skill, `` !`cmd` `` or a
-  ```` ```! ```` fence refuse it. Phrases that read like instructions to a model, and links to
-  other hosts (whose content can change after you review the body), are
-  warnings: copy what Claude needs into the body instead of linking it.
+  ```` ```! ```` fence refuse it. Phrases that read like instructions to
+  a model are warnings. So are links to other hosts, whose content can
+  change after you review the body; with `policy.fetch_allow` set, a link
+  to a host it doesn't list refuses the body. Copy what Claude needs into
+  the body instead of linking it.
 - Agent, skill, rule or command files under `.claude/` that mezha doesn't
   generate are reported by `verify`, since they skip mezha's checks.
 

@@ -163,6 +163,21 @@ fn policy(spec: &Spec, d: &mut Diagnostics) {
             );
         }
     }
+    match &policy.fetch_allow {
+        None => d.warn(
+            "policy.fetch_allow",
+            "is not set, so WebFetch can reach any host: whatever an agent has read can leave in \
+             a URL, and a skill's links can point anywhere (OWASP AST05)",
+            Some(r#"list the hosts agents may fetch from, such as ["docs.rs"], or [] for none"#),
+        ),
+        Some(hosts) => {
+            for (i, host) in hosts.iter().enumerate() {
+                if let Err(e) = crate::HostPattern::parse(host) {
+                    d.error(format!("policy.fetch_allow[{i}]"), e, None);
+                }
+            }
+        }
+    }
     if !policy.sandbox {
         d.warn(
             "policy.sandbox",

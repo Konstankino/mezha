@@ -55,6 +55,8 @@ pub enum RenderError {
     /// `permissions_ask` holds an invalid prefix (validation should have
     /// caught it first).
     Gates(String),
+    /// `fetch_allow` holds an invalid host (validation catches it first).
+    Fetch(String),
 }
 
 impl std::fmt::Display for RenderError {
@@ -67,6 +69,7 @@ impl std::fmt::Display for RenderError {
                  closed. Use WSL2 with os_mode = \"full\"."
             ),
             RenderError::Gates(e) => write!(f, "policy.permissions_ask: {e}"),
+            RenderError::Fetch(e) => write!(f, "policy.fetch_allow: {e}"),
         }
     }
 }
@@ -80,8 +83,10 @@ pub fn render(spec: &Spec, spec_text: &str, root: &Path) -> Result<Rendered, Ren
         return Err(RenderError::NativeWindows);
     }
     let gates = spec.gates().map_err(RenderError::Gates)?;
-    let mut settings_text = serde_json::to_string_pretty(&settings::settings(spec, &gates))
-        .expect("settings serialize");
+    let fetch = spec.fetch_allow().map_err(RenderError::Fetch)?;
+    let mut settings_text =
+        serde_json::to_string_pretty(&settings::settings(spec, &gates, fetch.as_deref()))
+            .expect("settings serialize");
     settings_text.push('\n');
     let components = components::render(spec, root);
     let mut files = components.files;

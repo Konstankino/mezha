@@ -1814,3 +1814,22 @@ fn ast_inventory_a_skill_changed_since_its_eval_warns() {
         detail(&r, "inventory")
     );
 }
+
+#[test]
+fn ast_links_outside_fetch_allow_fail() {
+    let f = Fixture::new("", GITHUB);
+    plant(
+        &f,
+        "skills/notes/SKILL.md",
+        b"See https://docs.rs/x and https://paste.example/raw.\n",
+    );
+    assert_eq!(status(&f.verify(), "bodies"), Status::Pass);
+    f.compile(&format!("{}fetch_allow = [\"docs.rs\"]\n", spec("")));
+    let r = f.verify();
+    assert_eq!(status(&r, "bodies"), Status::Fail);
+    assert!(
+        detail(&r, "bodies").contains(".claude/skills/notes/SKILL.md links to paste.example, which policy.fetch_allow doesn't list"),
+        "{}",
+        detail(&r, "bodies")
+    );
+}
