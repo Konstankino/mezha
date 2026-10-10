@@ -172,31 +172,14 @@ fn platform(ctx: &Ctx, f: &mut Findings) {
             };
             let bwrap = found("bwrap");
             let socat = found("socat");
+            let unshare = found("unshare");
             if bwrap.is_none() || socat.is_none() {
                 f.fail(
                     "bubblewrap or socat is missing, so the sandbox can't start",
                     "Install them (apt install bubblewrap socat).",
                 );
             } else if let Some(bwrap) = bwrap {
-                let ok = run(
-                    ctx,
-                    &Run {
-                        program: &bwrap,
-                        args: &["--ro-bind", "/", "/", "--dev", "/dev", "true"],
-                        cwd: &ctx.root,
-                        env: &[],
-                        remove: &[],
-                        stdin: b"",
-                        timeout: Duration::from_secs(5),
-                    },
-                )
-                .is_ok_and(|o| o.success());
-                if !ok {
-                    f.fail(
-                        "bubblewrap is installed but can't create a sandbox",
-                        "On Ubuntu 24.04 and later, allow unprivileged user namespaces for bwrap (kernel.apparmor_restrict_unprivileged_userns); in a container, see Claude Code's sandboxing docs.",
-                    );
-                }
+                bubblewrap(ctx, &bwrap, unshare.as_deref(), f);
             }
         }
         Platform::Wsl1 => f.fail(
@@ -211,6 +194,75 @@ fn platform(ctx: &Ctx, f: &mut Findings) {
             "unknown platform: can't tell whether the sandbox runs",
             None,
         ),
+    }
+}
+
+/// bwrap the way srt starts it: its own user and pid namespaces, the host
+/// read-only, a fresh `/proc`.
+const BWRAP_ARGS: [&str; 10] = [
+    "--unshare-user",
+    "--unshare-pid",
+    "--die-with-parent",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+];
+
+/// Can bwrap start a sandbox here, and can a process inside it still make
+/// a user namespace of its own? srt's seccomp helper does that before it
+/// applies the filter that blocks unix sockets, and `unshare -r`
+/// (util-linux) does the same: a new user namespace, `setgroups` denied,
+/// the caller's id mapped. On Ubuntu 24.04 and later the stock
+/// `bwrap-userns-restrict` AppArmor profile lets bwrap itself start but
+/// strips the capabilities the nested namespace needs, and bwrap 0.9.0
+/// clears the bounding set; either way Claude Code's sandbox then fails to
+/// start, or runs without the filter.
+fn bubblewrap(ctx: &Ctx, bwrap: &Path, unshare: Option<&Path>, f: &mut Findings) {
+    let inside = |command: &[&str]| {
+        let args: Vec<&str> = BWRAP_ARGS
+            .iter()
+            .copied()
+            .chain(command.iter().copied())
+            .collect();
+        run(
+            ctx,
+            &Run {
+                program: bwrap,
+                args: &args,
+                cwd: &ctx.root,
+                env: &[],
+                remove: &[],
+                stdin: b"",
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .is_ok_and(|o| o.success())
+    };
+    if !inside(&["true"]) {
+        f.fail(
+            "bubblewrap is installed but can't create a sandbox",
+            "On Ubuntu 24.04 and later, allow unprivileged user namespaces for bwrap (kernel.apparmor_restrict_unprivileged_userns); in a container, see Claude Code's sandboxing docs.",
+        );
+        return;
+    }
+    match unshare {
+        None => f.warn(
+            "can't tell whether a process inside bubblewrap can make a user namespace of its own, which srt's seccomp filter needs: `unshare` (util-linux) isn't on PATH",
+            None,
+        ),
+        Some(unshare) => {
+            let unshare = unshare.to_string_lossy();
+            if !inside(&[&unshare, "-r", "true"]) {
+                f.fail(
+                    "bubblewrap runs, but a process inside it can't make a user namespace of its own, which srt's seccomp filter needs: Claude Code's sandbox won't start, or runs without the filter that blocks unix sockets",
+                    "Replace the stock bwrap-userns-restrict AppArmor profile (Ubuntu 24.04 and later) with one that lets bwrap and what it starts create user namespaces, or set kernel.apparmor_restrict_unprivileged_userns=0, which also lowers the host's own hardening.",
+                );
+            }
+        }
     }
 }
 

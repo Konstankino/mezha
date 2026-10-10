@@ -21,7 +21,7 @@
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mezha_spec::SPEC_FILE;
@@ -87,6 +87,97 @@ pub fn no_new_privs(status: &str) -> bool {
         .any(|l| l.starts_with("NoNewPrivs:") && l.split_whitespace().nth(1) == Some("1"))
 }
 
+/// `Seccomp: 2` in `/proc/self/status`: a seccomp filter is applied. srt's
+/// is one; so is Docker's default, so this only says which way sockets
+/// that turn out open are open.
+pub fn seccomp_filter(status: &str) -> bool {
+    status
+        .lines()
+        .any(|l| l.starts_with("Seccomp:") && l.split_whitespace().nth(1) == Some("2"))
+}
+
+/// The real user id from `/proc/self/status`, as the sandbox maps it.
+pub fn uid(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// Whether a sandboxed command can open unix sockets: how an ssh or gpg
+/// agent, a keyring and git's credential-cache hand out credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sockets {
+    /// Refused (EPERM): srt's seccomp filter on Linux, its profile on
+    /// macOS.
+    Blocked,
+    /// A connect got through the sandbox to the socket layer.
+    Open,
+    Unknown(String),
+}
+
+/// Linux: srt's filter refuses `socket()` itself, so a connect to a path
+/// that doesn't exist tells. EPERM means sockets are blocked; ENOENT
+/// means the socket was made and only the path was missing.
+pub fn classify_linux(kind: ErrorKind) -> Sockets {
+    match kind {
+        ErrorKind::PermissionDenied => Sockets::Blocked,
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused => Sockets::Open,
+        other => Sockets::Unknown(format!(
+            "connecting to a unix socket failed oddly ({other:?})"
+        )),
+    }
+}
+
+/// macOS: the profile judges each connect by its path, after the path is
+/// looked up, so only sockets that exist tell. One refused means the
+/// profile denies by default (`allowUnixSockets` names paths, which the
+/// static checks read); every one let through means `allowAllUnixSockets`
+/// or an allowed path above them all.
+pub fn classify_macos(outcomes: &[Result<(), ErrorKind>]) -> Sockets {
+    if outcomes.contains(&Err(ErrorKind::PermissionDenied)) {
+        Sockets::Blocked
+    } else if outcomes.iter().any(|o| *o != Err(ErrorKind::NotFound)) {
+        Sockets::Open
+    } else {
+        Sockets::Unknown("no system socket was there to try".into())
+    }
+}
+
+/// System sockets every macOS has, which srt's profile doesn't allow on
+/// its own. A connect that gets through does nothing to them.
+const MACOS_SOCKETS: [&str; 2] = ["/private/var/run/mDNSResponder", "/var/run/syslog"];
+
+#[cfg(unix)]
+fn probe_sockets(platform: Platform) -> Sockets {
+    use std::os::unix::net::UnixStream;
+    match platform {
+        Platform::Linux | Platform::Wsl2 => {
+            let path = std::env::temp_dir().join("mezha-inside-no-such-socket");
+            match UnixStream::connect(&path) {
+                Ok(_) => Sockets::Open,
+                Err(e) => classify_linux(e.kind()),
+            }
+        }
+        Platform::MacOs => {
+            let outcomes: Vec<Result<(), ErrorKind>> = MACOS_SOCKETS
+                .iter()
+                .map(|path| UnixStream::connect(path).map(drop).map_err(|e| e.kind()))
+                .collect();
+            classify_macos(&outcomes)
+        }
+        _ => Sockets::Unknown("no sandbox on this platform".into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn probe_sockets(_: Platform) -> Sockets {
+    Sockets::Unknown("no unix sockets on this platform".into())
+}
+
 /// `/proc/self/net/dev` lists only loopback.
 pub fn loopback_only(net_dev: &str) -> bool {
     let names: Vec<&str> = net_dev
@@ -140,20 +231,29 @@ pub struct Signals {
     pub policy: Policy,
     /// `SANDBOX_RUNTIME` is set; anyone can set it, so it only informs.
     pub env_says_sandboxed: bool,
+    pub sockets: Sockets,
+    /// A seccomp filter is applied (Linux); informs the sockets verdict.
+    pub seccomp_filter: bool,
+    /// The user id, for the runtime directory agents listen in (Linux).
+    pub uid: Option<u32>,
 }
 
 impl Signals {
     pub fn gather(ctx: &Ctx) -> Signals {
         let proc =
             |file: &str| fs::read_to_string(format!("/proc/self/{file}")).unwrap_or_default();
+        let status = proc("status");
         Signals {
             platform: ctx.platform,
             direct: direct_egress(),
             single_id_map: single_id_map(&proc("uid_map")),
-            no_new_privs: no_new_privs(&proc("status")),
+            no_new_privs: no_new_privs(&status),
             loopback_only: loopback_only(&proc("net/dev")),
             policy: policy(&ctx.root),
             env_says_sandboxed: ctx.var("SANDBOX_RUNTIME").is_some(),
+            sockets: probe_sockets(ctx.platform),
+            seccomp_filter: seccomp_filter(&status),
+            uid: uid(&status),
         }
     }
 
@@ -468,15 +568,34 @@ pub fn credentials_check(ctx: &Ctx, git: Option<&GitConfig>, signals: &Signals) 
             None => {}
         }
     }
-    #[cfg(unix)]
-    if let Some(socket) = ctx.var("SSH_AUTH_SOCK") {
-        match std::os::unix::net::UnixStream::connect(socket) {
-            Ok(_) => reachable.push("the ssh agent (SSH_AUTH_SOCK)".into()),
-            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                withheld.push("the ssh agent (SSH_AUTH_SOCK)".into())
-            }
-            Err(_) => {}
+    // Agents and keyrings answer on unix sockets. The sandbox removes
+    // SSH_AUTH_SOCK, so the question is whether sockets can be opened at
+    // all, and if they can, which agents listen where they usually do.
+    let mut agents = Vec::new();
+    match &signals.sockets {
+        Sockets::Blocked => {
+            withheld.push("unix sockets (agents, keyrings, git credential-cache)".into())
         }
+        Sockets::Open => {
+            for (label, path) in agent_sockets(ctx, signals) {
+                if answers(&path) {
+                    agents.push(label);
+                }
+            }
+            if agents.is_empty() {
+                f.warn(
+                    format!(
+                        "{}; an ssh or gpg agent, a keyring or git's credential-cache would answer from here, though none is listening where they usually do now",
+                        open_sockets(signals)
+                    ),
+                    Some(sockets_fix(signals.platform).into()),
+                );
+            }
+        }
+        Sockets::Unknown(why) => f.warn(
+            format!("can't tell whether unix sockets are blocked: {why}"),
+            None,
+        ),
     }
     withheld.dedup();
     if !masked.is_empty() {
@@ -489,7 +608,7 @@ pub fn credentials_check(ctx: &Ctx, git: Option<&GitConfig>, signals: &Signals) 
             None,
         );
     }
-    if reachable.is_empty() {
+    if reachable.is_empty() && agents.is_empty() {
         f.add(
             Status::Pass,
             if withheld.is_empty() {
@@ -500,12 +619,108 @@ pub fn credentials_check(ctx: &Ctx, git: Option<&GitConfig>, signals: &Signals) 
             None,
         );
     } else {
-        f.fail(
-            format!("readable inside the sandbox: {}", reachable.join(", ")),
-            "Run `mezha compile`, and withhold anything else in sandbox.credentials in your user settings.",
-        );
+        let mut what = Vec::new();
+        let mut fix = Vec::new();
+        if !reachable.is_empty() {
+            what.push(format!(
+                "readable inside the sandbox: {}",
+                reachable.join(", ")
+            ));
+            fix.push("Run `mezha compile`, and withhold anything else in sandbox.credentials in your user settings.");
+        }
+        if !agents.is_empty() {
+            what.push(format!(
+                "answering inside the sandbox ({}): {}",
+                open_sockets(signals),
+                agents.join(", ")
+            ));
+            fix.push(sockets_fix(signals.platform));
+        }
+        f.fail(what.join("; "), fix.join(" "));
     }
     f.into_check(check, "")
+}
+
+/// Why unix sockets are open, as far as the signals say.
+fn open_sockets(signals: &Signals) -> &'static str {
+    match signals.platform {
+        Platform::Linux | Platform::Wsl2 if !signals.seccomp_filter => {
+            "unix sockets can be opened, and no seccomp filter is applied"
+        }
+        Platform::Linux | Platform::Wsl2 => {
+            "unix sockets can be opened although a seccomp filter is applied: srt's isn't in force, or the settings allow unix sockets"
+        }
+        _ => {
+            "unix sockets can be opened: the settings allow them (allowAllUnixSockets, or allowUnixSockets with a path above them all)"
+        }
+    }
+}
+
+fn sockets_fix(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Linux | Platform::Wsl2 => {
+            "Install srt's seccomp filter (`npm install -g @anthropic-ai/sandbox-runtime`; `/sandbox` in Claude Code lists it under Dependencies), remove allowAllUnixSockets and allowUnixSockets from your settings, and restart Claude Code."
+        }
+        _ => "Remove allowAllUnixSockets from your settings, and narrow allowUnixSockets.",
+    }
+}
+
+/// Where agents and keyrings usually listen, since the sandbox removes
+/// `SSH_AUTH_SOCK`: launchd's listeners on macOS, the user's runtime
+/// directory on Linux, and git's credential-cache.
+fn agent_sockets(ctx: &Ctx, signals: &Signals) -> Vec<(String, PathBuf)> {
+    let mut list = Vec::new();
+    if let Some(sock) = ctx.var("SSH_AUTH_SOCK") {
+        list.push((
+            "the ssh agent (SSH_AUTH_SOCK)".to_string(),
+            PathBuf::from(sock),
+        ));
+    }
+    if signals.platform == Platform::MacOs
+        && let Ok(entries) = fs::read_dir("/private/tmp")
+    {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("com.apple.launchd.")
+            {
+                let path = entry.path().join("Listeners");
+                list.push((format!("the ssh agent at {}", path.display()), path));
+            }
+        }
+    }
+    let runtime = ctx.var("XDG_RUNTIME_DIR").map(PathBuf::from).or_else(|| {
+        signals
+            .uid
+            .map(|uid| PathBuf::from(format!("/run/user/{uid}")))
+    });
+    if let Some(dir) = runtime {
+        for (what, rel) in [
+            ("the ssh agent", "keyring/ssh"),
+            ("the ssh agent", "gcr/ssh"),
+            ("the gpg agent", "gnupg/S.gpg-agent"),
+            ("the session bus, where keyrings answer", "bus"),
+        ] {
+            let path = dir.join(rel);
+            list.push((format!("{what} at {}", path.display()), path));
+        }
+    }
+    if let Some(path) = ctx.expand("~/.cache/git/credential/socket") {
+        list.push((format!("git credential-cache at {}", path.display()), path));
+    }
+    list
+}
+
+/// Something accepts a connection on this unix socket.
+#[cfg(unix)]
+fn answers(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+#[cfg(not(unix))]
+fn answers(_: &Path) -> bool {
+    false
 }
 
 /// The three inside checks and the notes that go with them.
@@ -553,6 +768,16 @@ mod tests {
         assert!(!single_id_map(""));
         assert!(no_new_privs("Name:\tbash\nNoNewPrivs:\t1\nSeccomp:\t2\n"));
         assert!(!no_new_privs("NoNewPrivs:\t0\n"));
+        assert!(seccomp_filter(
+            "NoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t1\n"
+        ));
+        assert!(!seccomp_filter("Seccomp:\t0\n"));
+        assert!(!seccomp_filter(""));
+        assert_eq!(
+            uid("Name:\tbash\nUid:\t1000\t1000\t1000\t1000\n"),
+            Some(1000)
+        );
+        assert_eq!(uid(""), None);
         let header = "Inter-|   Receive\n face |bytes\n";
         assert!(loopback_only(&format!("{header}    lo: 0 0\n")));
         assert!(!loopback_only(&format!(
@@ -570,7 +795,52 @@ mod tests {
             loopback_only: true,
             policy,
             env_says_sandboxed: false,
+            sockets: Sockets::Blocked,
+            seccomp_filter: true,
+            uid: Some(1000),
         }
+    }
+
+    #[test]
+    fn unix_sockets() {
+        assert_eq!(
+            classify_linux(ErrorKind::PermissionDenied),
+            Sockets::Blocked
+        );
+        assert_eq!(classify_linux(ErrorKind::NotFound), Sockets::Open);
+        assert_eq!(classify_linux(ErrorKind::ConnectionRefused), Sockets::Open);
+        assert!(matches!(
+            classify_linux(ErrorKind::Other),
+            Sockets::Unknown(_)
+        ));
+        // macOS: the profile answers only for sockets that exist. Seen
+        // under Claude Code's own sandbox: ENOENT for a missing path,
+        // EPERM for the system sockets.
+        let denied = Err(ErrorKind::PermissionDenied);
+        let missing = Err(ErrorKind::NotFound);
+        assert_eq!(classify_macos(&[denied, denied]), Sockets::Blocked);
+        assert_eq!(classify_macos(&[Ok(()), denied]), Sockets::Blocked);
+        assert_eq!(classify_macos(&[missing, denied]), Sockets::Blocked);
+        assert_eq!(classify_macos(&[Ok(()), missing]), Sockets::Open);
+        // A stream connect let through to syslog's datagram socket.
+        assert_eq!(
+            classify_macos(&[Ok(()), Err(ErrorKind::Other)]),
+            Sockets::Open
+        );
+        assert!(matches!(
+            classify_macos(&[missing, missing]),
+            Sockets::Unknown(_)
+        ));
+        assert!(matches!(classify_macos(&[]), Sockets::Unknown(_)));
+        let mut s = signals(Platform::Linux, Direct::NoRoute, Policy::Applied);
+        s.seccomp_filter = false;
+        assert!(open_sockets(&s).contains("no seccomp filter"));
+        s.seccomp_filter = true;
+        assert!(open_sockets(&s).contains("srt's isn't in force"));
+        assert!(
+            open_sockets(&signals(Platform::MacOs, Direct::Refused, Policy::Applied))
+                .contains("allowAllUnixSockets")
+        );
     }
 
     #[test]

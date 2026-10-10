@@ -1579,8 +1579,14 @@ Is Claude Code's sandbox on, strict and available?
   layer that would win;
 - no `excludedCommands` (commands that run outside the sandbox), no
   weaker-isolation flags, `allowUnsandboxedCommands` false;
-- the platform has a sandbox: `sandbox-exec` on macOS, a working bubblewrap
-  on Linux and WSL2; WSL1 and native Windows fail;
+- the platform has a sandbox: `sandbox-exec` on macOS; on Linux and WSL2 a
+  bubblewrap that starts, and in which a process can still make a user
+  namespace of its own, as srt's seccomp helper must before it applies the
+  filter that blocks unix sockets (`unshare -r` from util-linux stands in
+  for it; without `unshare` this is a warning). On Ubuntu 24.04 and later
+  the stock `bwrap-userns-restrict` AppArmor profile lets bwrap start but
+  not that nested namespace, so Claude Code's sandbox fails to start or runs
+  without the filter; WSL1 and native Windows fail;
 - Claude Code at least 2.1.246;
 - the project is the git root (Claude Code reads project settings from the
   directory it starts in).
@@ -1778,7 +1784,11 @@ It looks at the sandbox Claude Code really built:
   refused, and `mezha.toml` can't be opened for writing;
 - srt's proxy is in front, and the forge hosts in `deniedDomains` are
   refused, without contacting anything that would make Claude Code ask you;
-- no credential file, token variable or ssh agent is readable.
+- no credential file or token variable is readable, and unix sockets can't
+  be opened, so no ssh or gpg agent, keyring or git credential-cache can
+  answer. On Linux that is srt's seccomp filter, which is optional: when
+  it's missing, sockets open and the check warns, or fails once an agent
+  is listening where they usually do.
 
 The report reaches you through Claude: read the command's own output in the
 tool result, not Claude's summary. Without `CLAUDECODE` it exits 2.

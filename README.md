@@ -160,7 +160,11 @@ file, the `env` block and its proxy. It checks:
 - that srt's proxy is in front, and that forge hosts in `deniedDomains` are
   refused. It contacts nothing that could make Claude Code ask you about a
   host;
-- that no credential file, token variable or ssh agent is readable.
+- that no credential file or token variable is readable, and that unix
+  sockets can't be opened, so no ssh or gpg agent, keyring or git
+  credential-cache can answer. On Linux that is srt's seccomp filter, which
+  is optional: when it's missing, sockets open and the check warns, or
+  fails once an agent is listening where they usually do.
 
 The report reaches you through Claude, so treat it as a diagnostic: read
 the command's own output in the tool result, not Claude's summary. Without

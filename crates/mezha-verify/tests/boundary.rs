@@ -57,6 +57,7 @@ impl Fixture {
         f.tool("claude", "echo '2.1.285 (Claude Code)'");
         f.tool("bwrap", "exit 0");
         f.tool("socat", "exit 0");
+        f.tool("unshare", "exit 0");
         f.tool(
             "gh",
             "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 4",
@@ -502,6 +503,74 @@ fn a_broken_bwrap_fails_on_linux() {
     let r = f.verify();
     assert_eq!(status(&r, "sandbox"), Status::Fail);
     assert!(detail(&r, "sandbox").contains("bubblewrap"));
+}
+
+/// Ubuntu 24.04 and later with the stock bwrap AppArmor profile: bwrap
+/// starts, but a process inside it can't make a user namespace of its
+/// own, which srt's seccomp helper needs.
+#[test]
+fn a_bwrap_without_nested_user_namespaces_fails_on_linux() {
+    let f = Fixture::new("", GITHUB);
+    let log = f.base.join("bwrap.log");
+    f.tool(
+        "bwrap",
+        &format!(
+            r#"echo "$*" >> '{}'; case "$*" in *"/unshare -r "*) exit 1 ;; esac; exit 0"#,
+            log.display()
+        ),
+    );
+    let r = f.verify();
+    assert_eq!(
+        status(&r, "sandbox"),
+        Status::Fail,
+        "{}",
+        detail(&r, "sandbox")
+    );
+    assert!(
+        detail(&r, "sandbox").contains("can't make a user namespace of its own"),
+        "{}",
+        detail(&r, "sandbox")
+    );
+    // Both runs start bwrap the way srt does, and the second runs
+    // `unshare -r` inside it.
+    let calls = fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 2, "{calls}");
+    for line in &lines {
+        assert!(
+            line.starts_with("--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc "),
+            "{line}"
+        );
+    }
+    assert!(lines[0].ends_with(" true"), "{}", lines[0]);
+    assert!(
+        lines[1].ends_with(&format!(" {} -r true", f.bin.join("unshare").display())),
+        "{}",
+        lines[1]
+    );
+}
+
+/// Without util-linux's `unshare` the nested namespace can't be tried:
+/// a warning, not a verdict.
+#[test]
+fn without_unshare_the_nested_namespace_is_unknown() {
+    let f = Fixture::new("", GITHUB);
+    fs::remove_file(f.bin.join("unshare")).unwrap();
+    let mut ctx = f.ctx(Platform::Linux);
+    // Only the stand-ins, so the machine's own `unshare` can't stand in.
+    ctx.vars.insert("PATH".into(), f.bin.display().to_string());
+    let r = verify(&ctx, &Options::default()).unwrap();
+    assert_eq!(
+        status(&r, "sandbox"),
+        Status::Warn,
+        "{}",
+        detail(&r, "sandbox")
+    );
+    assert!(
+        detail(&r, "sandbox").contains("`unshare` (util-linux) isn't on PATH"),
+        "{}",
+        detail(&r, "sandbox")
+    );
 }
 
 #[test]
@@ -987,6 +1056,9 @@ fn sandboxed() -> mezha_verify::inside::Signals {
         loopback_only: true,
         policy: mezha_verify::inside::Policy::Applied,
         env_says_sandboxed: true,
+        sockets: mezha_verify::inside::Sockets::Blocked,
+        seccomp_filter: true,
+        uid: Some(1000),
     }
 }
 
@@ -1078,6 +1150,79 @@ fn inside_credentials_are_judged_as_seen() {
 
 fn r_contains_secret(text: &str) -> bool {
     text.contains("glpat-real") || text.contains("password x")
+}
+
+/// A fixture context whose runtime directory is `<base>/run`, and signals
+/// as Linux without srt's seccomp filter shows them: unix sockets open.
+fn open_sockets(f: &Fixture) -> (Ctx, mezha_verify::inside::Signals, PathBuf) {
+    let runtime = f.base.join("run");
+    fs::create_dir_all(runtime.join("keyring")).unwrap();
+    let mut ctx = f.ctx(Platform::Linux);
+    ctx.vars
+        .insert("XDG_RUNTIME_DIR".into(), runtime.display().to_string());
+    let mut signals = sandboxed();
+    signals.sockets = mezha_verify::inside::Sockets::Open;
+    signals.seccomp_filter = false;
+    (ctx, signals, runtime)
+}
+
+/// Open unix sockets warn while no agent listens; with the filter in
+/// force, sockets are what's withheld.
+#[test]
+fn inside_open_unix_sockets_warn() {
+    let f = Fixture::new("", GITHUB);
+    let (ctx, mut signals, _) = open_sockets(&f);
+    let c = mezha_verify::inside::credentials_check(&ctx, None, &signals);
+    assert_eq!(c.status, Status::Warn, "{}", c.detail);
+    assert!(
+        c.detail
+            .contains("unix sockets can be opened, and no seccomp filter is applied"),
+        "{}",
+        c.detail
+    );
+    assert!(
+        c.fix
+            .as_deref()
+            .is_some_and(|fix| fix.contains("npm install -g")),
+        "{:?}",
+        c.fix
+    );
+
+    signals.sockets = mezha_verify::inside::Sockets::Blocked;
+    let c = mezha_verify::inside::credentials_check(&ctx, None, &signals);
+    assert_eq!(c.status, Status::Pass, "{}", c.detail);
+    assert!(
+        c.detail
+            .contains("withheld: unix sockets (agents, keyrings, git credential-cache)"),
+        "{}",
+        c.detail
+    );
+}
+
+/// An agent listening where they usually do fails the check. (Binds a
+/// unix socket, which a sandbox refuses.)
+#[test]
+fn inside_a_listening_agent_fails() {
+    let f = Fixture::new("", GITHUB);
+    let (ctx, signals, runtime) = open_sockets(&f);
+    let _agent = std::os::unix::net::UnixListener::bind(runtime.join("keyring/ssh")).unwrap();
+    let c = mezha_verify::inside::credentials_check(&ctx, None, &signals);
+    assert_eq!(c.status, Status::Fail, "{}", c.detail);
+    assert!(
+        c.detail.contains(&format!(
+            "answering inside the sandbox (unix sockets can be opened, and no seccomp filter is applied): the ssh agent at {}",
+            runtime.join("keyring/ssh").display()
+        )),
+        "{}",
+        c.detail
+    );
+    assert!(
+        c.fix
+            .as_deref()
+            .is_some_and(|fix| fix.contains("npm install -g")),
+        "{:?}",
+        c.fix
+    );
 }
 
 const WITH_AGENTS: &str = r#"[project]
