@@ -31,6 +31,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
 | Repository config that runs code (`project-config` in verify) | Integrity | Settings that run a command, install plugins or point Claude's traffic elsewhere, and MCP servers from `.mcp.json`, all run outside the sandbox when a session starts. verify fails on them in the shared settings file and on any approval of every `.mcp.json` server, and warns about servers and about such settings in your local file. |
 | Reviewed skills only (`inventory` in verify) | Integrity | Claude Code prefers a personal skill to a project skill with the same name, so verify fails when one in `~/.claude/skills` shadows the project's. Personal and plugin skills not listed in `policy.external_skills` warn, and an agent may preload only skills the spec defines or lists. |
+| Audit log under `~/.mezha/audit` | Evidence (boundary on `~/.mezha`) | The gate records every call it decides before it runs, and a second hook records how it ended. Sandboxed commands can't write there and the file tools are denied, so an agent can't rewrite its own record; your own processes can, so it is evidence against the agent, not against you. A call that can't be recorded is blocked. See [Audit log](#audit-log). |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
 | A dream writes only the role's staged memory | **Boundary** (Claude Code permissions) | The dreamer runs as `claude -p --restricted` with `dontAsk`, no prompts, five file tools and one allow rule; mezha stops it if Claude Code reports other tools, MCP servers or another mode. See [Dreams](#dreams). |
@@ -196,7 +197,10 @@ the command's own output in the tool result, not Claude's summary. Without
     commands when they load;
   - `enableAllProjectMcpServers: false`: each server in `.mcp.json` waits
     for your approval;
-  - one `PreToolUse` hook on every tool: the approval gate.
+  - one `PreToolUse` hook on every tool: the approval gate, which also
+    writes the [audit log](#audit-log);
+  - `PostToolUse` and `PostToolUseFailure` hooks on every tool, which record
+    how each call ended.
 - `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md` and
   `.claude/rules/<name>.md`: frontmatter from the spec, body from your
   Markdown file under `mezha/` (see [Writing agents](#writing-agents)).
@@ -209,6 +213,38 @@ A trap: the sandbox may not write `mezha/`, `mezha.toml`, `.claude/rules` or
 agent memory, so a sandboxed `git switch`, `rebase` or `stash` across commits
 that change those paths stops part-way. Run such git commands in your own
 terminal.
+
+## Audit log
+
+Every tool call the gate decides on gets a line in
+`~/.mezha/audit/<sha256 of the repository root>/<YYYYMMDD>.jsonl` before it
+runs (OWASP Agentic Skills Top 10, AST09):
+
+```json
+{"v":1,"type":"admission","attempt_id":"sha256:…","preimage":["session_id","tool_use_id"],"session_id":"…","tool_use_id":"…","agent_type":"explorer","tool_name":"Read","ts_ms":1791648000000,"input_sha256":"sha256:…","decision":"pass","policy":"sha256:…"}
+```
+
+- `decision` is `pass` or `block` (with the `reason` Claude was given).
+  `pass` means mezha didn't object; Claude Code's permission rules still
+  apply after it.
+- `policy` is the spec fingerprint `mezha compile` recorded, so a record
+  says which rules were in force.
+- After the call, a second line with the same `attempt_id` gives its
+  `terminal_state`: `committed`, or `failed` (with `interrupted` when you
+  stopped it). An admission without an outcome is a call that was denied
+  later, or a gap in the log.
+- `attempt_id` is the SHA-256 of the fields `preimage` names, joined by a
+  NUL, so you can recompute it from the transcript.
+- No content: tool input becomes a digest, since it can hold secrets or
+  PHI. The session transcript keeps the content.
+- If a record can't be written, the gate blocks the call, like every other
+  failure in the hook. Each record is a single append without a lock, so a
+  slow disk can't stall the hook until Claude Code gives up and lets the
+  call through.
+- Nothing is deleted: remove old files yourself.
+
+`mezha verify` runs the gate with a scratch home and fails if it didn't
+write its records.
 
 ## Writing agents
 

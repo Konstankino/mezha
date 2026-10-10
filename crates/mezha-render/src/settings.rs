@@ -186,6 +186,16 @@ pub fn read_rule(path: &str, is_dir: bool) -> String {
     }
 }
 
+fn audit_hook() -> Value {
+    json!({
+        "hooks": [{
+            "type": "command",
+            "command": mezha_hooks::audit_command(),
+            "shell": "bash",
+        }]
+    })
+}
+
 pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
     let mut ask: Vec<String> = gates.iter().map(|g| format!("Bash({g} *)")).collect();
     ask.extend(ASK_EDITS.iter().chain(&ASK_COMMANDS).map(|s| s.to_string()));
@@ -224,7 +234,10 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
                     "command": mezha_hooks::command_line(gates),
                     "shell": "bash",
                 }]
-            }]
+            }],
+            // How each call the gate admitted ended, for the audit log.
+            "PostToolUse": [audit_hook()],
+            "PostToolUseFailure": [audit_hook()],
         },
     });
     if spec.policy.sandbox {

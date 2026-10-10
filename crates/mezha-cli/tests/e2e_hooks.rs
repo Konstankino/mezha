@@ -343,3 +343,88 @@ fn an_agent_s_bash_scope_is_enforced_by_its_hook() {
     // Without mezha, the hook fails closed.
     assert_eq!(fire("cargo test", &setup.path(OnPath::Missing)), 2);
 }
+
+#[test]
+fn every_call_lands_in_the_audit_log() {
+    let s = setup();
+    let mut push = bash_event("git push");
+    push["tool_use_id"] = json!("toolu_9");
+    assert_eq!(s.fire(&push).0, 2);
+    assert_eq!(s.fire(&read_event()).0, 0);
+
+    // The outcome hook, as compile renders it for both events.
+    let settings: Value = serde_json::from_str(&s.p.read(".claude/settings.json")).unwrap();
+    for event in ["PostToolUse", "PostToolUseFailure"] {
+        let group = &settings["hooks"][event][0];
+        assert!(group.get("matcher").is_none(), "{event} sees every tool");
+        let command = group["hooks"][0]["command"].as_str().unwrap();
+        let done = json!({
+            "session_id": "e2e",
+            "hook_event_name": event,
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_9",
+        });
+        let (code, err) = s.fire_with(command, &s.path(OnPath::Mezha), Some(&s.p.root), &done);
+        assert_eq!((code, err.as_str()), (0, ""));
+    }
+
+    let root = mezha_broker::repo_root(&s.p.root);
+    let dir = mezha_hooks::audit::dir(&s.p.home, Some(&root));
+    let text: String = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    let records: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<(&str, &str)> = records
+        .iter()
+        .map(|r| {
+            (
+                r["type"].as_str().unwrap(),
+                r["decision"]
+                    .as_str()
+                    .or(r["terminal_state"].as_str())
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("admission", "block"),
+            ("admission", "pass"),
+            ("outcome", "committed"),
+            ("outcome", "failed")
+        ]
+    );
+    assert_eq!(records[0]["attempt_id"], records[2]["attempt_id"]);
+    assert!(
+        records[0]["policy"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        let file = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(mode(&file), 0o600);
+    }
+}
+
+#[test]
+fn an_unwritable_audit_log_blocks() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup();
+    let store = approvals::mezha_home(&s.p.home);
+    fs::create_dir_all(&store).unwrap();
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o500)).unwrap();
+    let (code, err) = s.fire(&read_event());
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("couldn't write the audit log"), "{err}");
+}

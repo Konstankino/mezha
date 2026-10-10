@@ -9,6 +9,7 @@
 
 pub mod agent_bash;
 mod approval_gate;
+pub mod audit;
 pub mod dream_guard;
 pub mod matcher;
 mod paths;
@@ -29,7 +30,12 @@ pub const PROTOCOL: u32 = 1;
 pub const MAX_INPUT: usize = 1 << 20;
 
 /// The hooks this binary implements.
-pub const HOOKS: [&str; 3] = [approval_gate::NAME, agent_bash::NAME, dream_guard::NAME];
+pub const HOOKS: [&str; 4] = [
+    approval_gate::NAME,
+    agent_bash::NAME,
+    dream_guard::NAME,
+    audit::NAME,
+];
 
 /// What the hook prints to stderr and exits with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +71,8 @@ pub struct Env {
     vars: HashMap<String, String>,
     /// Unix seconds.
     pub now: u64,
+    /// Unix milliseconds, for the audit log.
+    pub now_ms: u64,
 }
 
 impl Env {
@@ -78,18 +86,22 @@ impl Env {
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
             now,
+            now_ms: now * 1000,
         }
     }
 
     pub fn from_process() -> Self {
-        let now = std::time::SystemTime::now()
+        let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        Env::new(
-            std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
-            now,
-        )
+            .unwrap_or_default();
+        Env {
+            now_ms: elapsed.as_millis() as u64,
+            ..Env::new(
+                std::env::vars_os()
+                    .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+                elapsed.as_secs(),
+            )
+        }
     }
 
     /// A variable's value; empty counts as unset.
@@ -110,6 +122,11 @@ pub fn command_line(gates: &[CommandPrefix]) -> String {
     }
     line.push_str(" || exit 2");
     line
+}
+
+/// The command Claude Code runs after each tool call, for the audit log.
+pub fn audit_command() -> String {
+    format!("mezha hook {} --protocol {PROTOCOL} || exit 2", audit::NAME)
 }
 
 /// The command an agent's frontmatter runs to keep its Bash within `scopes`.
@@ -218,6 +235,9 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
         approval_gate::NAME => !scopes.is_empty() || !read.is_empty() || write.is_some(),
         agent_bash::NAME => !gates.is_empty() || !read.is_empty() || write.is_some(),
         dream_guard::NAME => !gates.is_empty() || !scopes.is_empty(),
+        audit::NAME => {
+            !gates.is_empty() || !scopes.is_empty() || !read.is_empty() || write.is_some()
+        }
         _ => false,
     };
     if foreign {
@@ -229,6 +249,7 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
         approval_gate::NAME => approval_gate::run(&gates, input, env),
         agent_bash::NAME => agent_bash::run(&scopes, input),
         dream_guard::NAME => dream_guard::run(&read, write.as_deref(), input),
+        audit::NAME => audit::outcome(input, env),
         other => Outcome::block(format!("mezha hook: unknown hook `{other}`")),
     }
 }

@@ -334,13 +334,32 @@ fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
             wrong.push(format!("`{cmd}` gave {got}, expected exit {expect}"));
         }
     }
+    let root = mezha_broker::repo_root(&ctx.root);
+    let logged = audit_records(&mezha_hooks::audit::dir(scratch.path(), Some(&root)));
     drop(scratch);
     if !wrong.is_empty() {
         f.fail(
             format!("the gate doesn't behave: {}", wrong.join(", ")),
             "Reinstall mezha and run `mezha compile`; if it persists, report a mezha bug.",
         );
+    } else if logged < 3 {
+        f.fail(
+            format!("the gate decided 3 calls but wrote {logged} audit record(s)"),
+            "Reinstall mezha and run `mezha compile`; if it persists, report a mezha bug.",
+        );
     }
+}
+
+/// Lines in the audit log files under `dir`.
+fn audit_records(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .map(|t| t.lines().count())
+        .sum()
 }
 
 #[cfg(test)]

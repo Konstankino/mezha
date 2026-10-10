@@ -260,3 +260,114 @@ fn expired_and_implausible_approvals_block() {
     approvals::grant(&f.home, &f.repo, 1440, NOW + 86_400).unwrap();
     assert!(f.fire(bash("git push")).is_block(), "too far ahead");
 }
+
+/// The audit log's records for the fixture's repository, oldest first.
+fn audit(f: &Fixture) -> Vec<Value> {
+    let dir = mezha_hooks::audit::dir(&f.home, Some(&f.repo));
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .flat_map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect::<Vec<Value>>()
+        })
+        .collect()
+}
+
+#[test]
+fn every_decision_is_recorded_without_its_content() {
+    let f = Fixture::new();
+    let mut push = bash("git push origin main --token=s3cret");
+    push["tool_use_id"] = json!("toolu_1");
+    assert!(f.fire(push).is_block());
+    let mut read = tool("Read", json!({ "file_path": "/etc/hosts" }));
+    read["session_id"] = json!("s");
+    read["tool_use_id"] = json!("toolu_2");
+    read["agent_type"] = json!("explorer");
+    assert_eq!(f.fire(read), Outcome::allow());
+
+    let records = audit(&f);
+    assert_eq!(records.len(), 2, "{records:#?}");
+    let (block, pass) = (&records[0], &records[1]);
+    assert_eq!(block["type"], "admission");
+    assert_eq!(block["decision"], "block");
+    assert!(block["reason"].as_str().unwrap().contains("is gated"));
+    assert_eq!(block["tool_name"], "Bash");
+    assert_eq!(block["ts_ms"], NOW * 1000);
+    assert_eq!(block["preimage"], json!(["session_id", "tool_use_id"]));
+    assert!(
+        block["input_sha256"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(pass["decision"], "pass");
+    assert_eq!(pass["agent_type"], "explorer");
+    assert!(pass.get("reason").is_none());
+    // Digests only: no command text, no paths.
+    let text = serde_json::to_string(&records).unwrap();
+    assert!(
+        !text.contains("s3cret") && !text.contains("/etc/hosts"),
+        "{text}"
+    );
+    let dir = mezha_hooks::audit::dir(&f.home, Some(&f.repo));
+    assert!(dir.starts_with(approvals::mezha_home(&f.home).join("audit")));
+
+    // The outcome joins its admission by attempt_id.
+    let done = json!({
+        "session_id": "s",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_use_id": "toolu_2",
+        "tool_response": { "content": "secret file text" },
+    });
+    let argv: Vec<String> = ["audit-outcome", "--protocol", &PROTOCOL.to_string()]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        run(&argv, done.to_string().as_bytes(), &f.env()),
+        Outcome::allow()
+    );
+    let records = audit(&f);
+    assert_eq!(records[2]["type"], "outcome");
+    assert_eq!(records[2]["terminal_state"], "committed");
+    assert_eq!(records[2]["attempt_id"], records[1]["attempt_id"]);
+    assert!(
+        !serde_json::to_string(&records[2])
+            .unwrap()
+            .contains("secret file")
+    );
+    let mut failed = done.clone();
+    failed["hook_event_name"] = json!("PostToolUseFailure");
+    failed["is_interrupt"] = json!(true);
+    run(&argv, failed.to_string().as_bytes(), &f.env());
+    let last = audit(&f).pop().unwrap();
+    assert_eq!(last["terminal_state"], "failed");
+    assert_eq!(last["interrupted"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_call_that_cannot_be_recorded_is_blocked() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let store = approvals::mezha_home(&f.home);
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = f.fire(bash("git status"));
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(out.is_block(), "{out:?}");
+    assert!(
+        out.stderr.contains("couldn't write the audit log"),
+        "{}",
+        out.stderr
+    );
+}

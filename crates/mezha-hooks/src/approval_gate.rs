@@ -1,6 +1,7 @@
 //! The approval gate: a PreToolUse hook on every tool. Gated commands need an
 //! active `mezha approve`, the agent may not approve itself, and no tool may
-//! touch `~/.mezha`. Anything it can't make sense of is blocked.
+//! touch `~/.mezha`. Anything it can't make sense of is blocked. Every
+//! decision goes to the audit log ([`crate::audit`]).
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +9,7 @@ use mezha_broker::approvals;
 use mezha_spec::CommandPrefix;
 use serde_json::{Map, Value};
 
+use crate::audit;
 use crate::matcher::{self, Hit};
 use crate::paths::{resolve, within};
 use crate::{Env, MAX_INPUT, Outcome};
@@ -22,7 +24,38 @@ const PATH_KEYS: [&str; 3] = ["file_path", "notebook_path", "path"];
 
 const ADVISORY: &str = "(mezha approval gate: advisory. The boundary is the sandbox and the credentials it withholds.)";
 
+/// Decides, then records the decision in the audit log. A call that can't
+/// be recorded is blocked too (fail-closed).
 pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
+    let event = std::str::from_utf8(input)
+        .ok()
+        .filter(|_| input.len() <= MAX_INPUT)
+        .and_then(|t| serde_json::from_str::<Value>(t).ok())
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let outcome = decide(gates, input, env);
+    let Some(home) = mezha_broker::home_dir(|k| env.var(k).map(str::to_string)) else {
+        return outcome;
+    };
+    let root = project_dir(env, &event).map(|p| mezha_broker::repo_root(&p));
+    let record = audit::admission(&event, input, env, root.as_deref(), &outcome);
+    match audit::append(&home, root.as_deref(), env.now, &record) {
+        Ok(()) => outcome,
+        Err(e) if outcome.is_block() => Outcome::block(format!(
+            "{}mezha: couldn't write the audit log either: {e}",
+            outcome.stderr
+        )),
+        Err(e) => Outcome::block(format!(
+            "mezha: couldn't write the audit log in {}: {e}. The call is blocked (fail-closed).",
+            audit::dir(&home, root.as_deref()).display()
+        )),
+    }
+}
+
+fn decide(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
     if input.len() > MAX_INPUT {
         return Outcome::block("mezha: hook input is too large to check");
     }
@@ -68,7 +101,7 @@ pub fn run(gates: &[CommandPrefix], input: &[u8], env: &Env) -> Outcome {
 }
 
 /// `CLAUDE_PROJECT_DIR`, else the event's `cwd`.
-fn project_dir(env: &Env, event: &Map<String, Value>) -> Option<PathBuf> {
+pub(crate) fn project_dir(env: &Env, event: &Map<String, Value>) -> Option<PathBuf> {
     env.var("CLAUDE_PROJECT_DIR")
         .or_else(|| {
             event

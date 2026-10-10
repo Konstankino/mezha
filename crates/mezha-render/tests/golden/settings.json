@@ -10,6 +10,28 @@
     "GIT_TERMINAL_PROMPT": "0"
   },
   "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "mezha hook audit-outcome --protocol 1 || exit 2",
+            "shell": "bash",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "mezha hook audit-outcome --protocol 1 || exit 2",
+            "shell": "bash",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [
