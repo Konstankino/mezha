@@ -32,6 +32,7 @@ external_skills = []
 # dream_model = "sonnet"       # the model `mezha dream` runs the dreamer on
 # dream_budget_usd = 1.0       # the most one role's dream may cost
 # dream_max_turns = 40
+# auto_memory = "read-only"   # sessions read Claude Code's auto memory but can't write it; "writable" to allow
 
 # Agents, skills and rules: mezha writes the frontmatter into .claude/, and
 # the body comes from a Markdown file you own under mezha/ (by default

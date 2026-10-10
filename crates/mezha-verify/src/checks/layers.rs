@@ -4,13 +4,14 @@
 use serde_json::Value;
 
 use mezha_render::settings::GIT_GUARD_ENV;
+use mezha_spec::{AutoMemory, Spec};
 
 use crate::Options;
 use crate::ctx::Ctx;
 use crate::layers::{Layers, Scope};
 use crate::report::{Check, Findings, Kind};
 
-pub fn check(ctx: &Ctx, layers: &Layers, opts: &Options) -> Check {
+pub fn check(ctx: &Ctx, layers: &Layers, spec: &Spec, opts: &Options) -> Check {
     let check = Check::new(
         "settings-layers",
         "no settings file weakens the gate",
@@ -66,6 +67,25 @@ pub fn check(ctx: &Ctx, layers: &Layers, opts: &Options) -> Check {
             ),
             format!("Remove disableSkillShellExecution from {}.", layer.label),
         );
+    }
+    // The read-only rule names `~/.claude/projects`; auto memory kept
+    // anywhere else is writable (OWASP AST01, "memory poisoning").
+    if spec.memory.auto_memory == AutoMemory::ReadOnly {
+        if let Some((Value::String(dir), layer)) = layers.winner("/autoMemoryDirectory") {
+            f.warn(
+                format!(
+                    "autoMemoryDirectory in {} moves auto memory to {dir}, which sessions can still write",
+                    layer.label
+                ),
+                Some(format!("Remove autoMemoryDirectory from {}.", layer.label)),
+            );
+        }
+        if !opts.project_only && ctx.var("CLAUDE_CONFIG_DIR").is_some() {
+            f.warn(
+                "CLAUDE_CONFIG_DIR is set, so auto memory lives outside ~/.claude/projects, where sessions can still write it",
+                None,
+            );
+        }
     }
     for (key, expected) in GIT_GUARD_ENV {
         if let Some((v, layer)) = layers.winner(&format!("/env/{key}"))

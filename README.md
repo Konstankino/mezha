@@ -34,6 +34,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 | Audit log under `~/.mezha/audit` | Evidence (boundary on `~/.mezha`) | The gate records every call it decides before it runs, and a second hook records how it ended. Sandboxed commands can't write there and the file tools are denied, so an agent can't rewrite its own record; your own processes can, so it is evidence against the agent, not against you. A call that can't be recorded is blocked. See [Audit log](#audit-log). |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
+| Auto memory is read-only in sessions (`memory.auto_memory`) | **Boundary** (deny rule) | Claude Code's auto memory loads into every session and worktree of the project, so a line written there acts like an instruction later. A deny rule on `~/.claude/projects` keeps sessions from writing it (and their transcripts, which dreams read) while it still loads. `auto_memory = "writable"` turns this off; verify warns when `autoMemoryDirectory` or `CLAUDE_CONFIG_DIR` moves it where the rule doesn't reach. |
 | A dream writes only the role's staged memory | **Boundary** (Claude Code permissions) | The dreamer runs as `claude -p --restricted` with `dontAsk`, no prompts, five file tools and one allow rule; mezha stops it if Claude Code reports other tools, MCP servers or another mode. See [Dreams](#dreams). |
 | mezha's review of a dream | Integrity | mezha, not the model, reads the staged memory once, refuses anything but flat Markdown files and a clean worktree, and commits exactly the bytes it read, with the repository's git hooks off. |
 | Code owners review memory changes | **Boundary** (server) | With `/.claude/agent-memory/` in CODEOWNERS and code owner reviews required, a dream branch needs their approval to land. verify warns until it is set up. |
@@ -178,12 +179,15 @@ the command's own output in the tool result, not Claude's summary. Without
 
 - `.claude/settings.json`:
   - `permissions.ask`: the gated commands, edits to `mezha.toml`, the
-    settings files, the body sources under `mezha/` and the generated agents,
-    skills and rules, and `mezha compile/apply/init`, so an agent can't
-    quietly remove a gate or rewrite what an agent is told;
+    settings files, the body sources under `mezha/`, the generated agents,
+    skills and rules, every `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`
+    (and `~/.claude/CLAUDE.md`), and `mezha compile/apply/init`, so an agent
+    can't quietly remove a gate or rewrite what an agent is told;
   - `permissions.deny`: `mezha approve`, edits under `~/.mezha`, reads of
     dream digests under `~/.mezha/dreams`, edits to agent memory in every
-    scope, the `deny_reads` patterns, and reads of known credential files;
+    scope and (unless `memory.auto_memory = "writable"`) to auto memory and
+    transcripts under `~/.claude/projects`, the `deny_reads` patterns, and
+    reads of known credential files;
   - `env`: git starts with no credential helper, no askpass and no terminal
     prompt (advisory);
   - `sandbox` (when `policy.sandbox = true`): enabled, no unsandboxed

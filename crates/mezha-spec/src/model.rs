@@ -102,6 +102,21 @@ pub struct Memory {
     pub dream_at: Option<String>,
     /// A five-field cron expression for `dream_schedule = "cron"`.
     pub dream_cron: Option<String>,
+    /// Whether sessions may write Claude Code's auto memory.
+    pub auto_memory: AutoMemory,
+}
+
+/// Claude Code's auto memory (`~/.claude/projects/<project>/memory/`) loads
+/// into every session of the project and its worktrees, so a write to it
+/// persists like an instruction (OWASP AST01, "memory poisoning").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutoMemory {
+    /// Sessions read it but may not write it.
+    #[default]
+    ReadOnly,
+    /// Sessions write it without review, as Claude Code does by default.
+    Writable,
 }
 
 pub const DEFAULT_DREAM_MODEL: &str = "sonnet";

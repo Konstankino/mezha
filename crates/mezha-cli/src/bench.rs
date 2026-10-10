@@ -19,9 +19,6 @@ use serde_json::Value;
 use crate::files::shell_word;
 use crate::git::Git;
 
-/// Keeps sessions from writing auto memory, which all worktrees share.
-/// Turning auto memory off instead would turn agent memory off too.
-const NO_AUTO_MEMORY_WRITES: &str = r#"{"permissions":{"deny":["Edit(~/.claude/projects/**)"]}}"#;
 const IDENTITY: [&str; 4] = ["-c", "user.name=mezha", "-c", "user.email=mezha@localhost"];
 /// A run's diff kept for the report, at most.
 const MAX_DIFF: usize = 64 * 1024;
@@ -262,6 +259,10 @@ impl Bench<'_> {
     ) -> Result<claude::Outcome> {
         let turns = s.max_turns.to_string();
         let budget = format!("{:.2}", s.budget_usd);
+        let no_auto_memory = serde_json::json!({
+            "permissions": { "deny": [mezha_render::settings::AUTO_MEMORY_DENY] }
+        })
+        .to_string();
         let mut args = vec!["-p"];
         if let Some(agent) = s.agent {
             args.extend(["--agent", agent]);
@@ -281,7 +282,7 @@ impl Bench<'_> {
             &budget,
             "--no-session-persistence",
             "--settings",
-            NO_AUTO_MEMORY_WRITES,
+            &no_auto_memory,
         ]);
         if let Some(model) = s.model {
             args.extend(["--model", model]);

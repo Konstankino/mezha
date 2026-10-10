@@ -1,7 +1,7 @@
 //! `.claude/settings.json`, built as JSON values (never from text templates)
 //! and limited to keys Claude Code documents.
 
-use mezha_spec::{CommandPrefix, Spec};
+use mezha_spec::{AutoMemory, CommandPrefix, Spec};
 use serde_json::{Map, Value, json};
 
 pub const SCHEMA_URL: &str = "https://json.schemastore.org/claude-code-settings.json";
@@ -19,6 +19,22 @@ const ASK_EDITS: [&str; 8] = [
     "Edit(/.claude/skills/**)",
     "Edit(/.claude/rules/**)",
 ];
+
+/// Instruction files every session loads ask before an edit too: a line
+/// planted there persists past the session (OWASP AST01, "SOUL.md
+/// persistence"). Advisory: people edit them through Claude, so this asks
+/// rather than denies. `/**/` matches the root as well.
+const ASK_INSTRUCTION_EDITS: [&str; 4] = [
+    "Edit(/**/CLAUDE.md)",
+    "Edit(/**/CLAUDE.local.md)",
+    "Edit(/**/AGENTS.md)",
+    "Edit(~/.claude/CLAUDE.md)",
+];
+
+/// Keeps sessions from writing Claude Code's auto memory, which every
+/// session and worktree of the project loads. Turning auto memory off
+/// instead would turn agent memory off too.
+pub const AUTO_MEMORY_DENY: &str = "Edit(~/.claude/projects/**)";
 
 /// Agent memory changes only through `mezha dream`, which a person reviews
 /// (ADR-0004): sessions may not write it in any scope. Claude Code checks
@@ -198,7 +214,13 @@ fn audit_hook() -> Value {
 
 pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
     let mut ask: Vec<String> = gates.iter().map(|g| format!("Bash({g} *)")).collect();
-    ask.extend(ASK_EDITS.iter().chain(&ASK_COMMANDS).map(|s| s.to_string()));
+    ask.extend(
+        ASK_EDITS
+            .iter()
+            .chain(&ASK_INSTRUCTION_EDITS)
+            .chain(&ASK_COMMANDS)
+            .map(|s| s.to_string()),
+    );
 
     let mut deny = vec![
         "Bash(mezha approve *)".to_string(),
@@ -206,6 +228,9 @@ pub fn settings(spec: &Spec, gates: &[CommandPrefix]) -> Value {
         DREAMS_READ_DENY.to_string(),
     ];
     deny.extend(MEMORY_DENY.iter().map(|s| s.to_string()));
+    if spec.memory.auto_memory == AutoMemory::ReadOnly {
+        deny.push(AUTO_MEMORY_DENY.to_string());
+    }
     deny.extend(spec.policy.deny_reads.iter().map(|p| format!("Read({p})")));
     deny.extend(CREDENTIAL_FILES.iter().map(|&(p, dir)| read_rule(p, dir)));
 

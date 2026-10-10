@@ -1652,3 +1652,27 @@ fn ast_inventory_external_skills_need_review() {
     );
     assert!(detail(&r, "inventory").contains("0 project, 1 personal and 1 plugin skill(s)"));
 }
+
+#[test]
+fn ast_auto_memory_is_read_only_unless_the_spec_says_otherwise() {
+    let f = Fixture::new("", GITHUB);
+    let settings = fs::read_to_string(f.root.join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("\"Edit(~/.claude/projects/**)\""));
+    assert!(settings.contains("\"Edit(/**/CLAUDE.md)\""));
+    assert_eq!(status(&f.verify(), "settings-layers"), Status::Pass);
+
+    // Moved where the rule doesn't reach: a warning.
+    f.user_settings(json!({ "autoMemoryDirectory": "~/notes/claude" }));
+    let r = f.verify();
+    assert_eq!(status(&r, "settings-layers"), Status::Warn);
+    assert!(detail(&r, "settings-layers").contains("autoMemoryDirectory"));
+
+    // Writable by choice: no rule, and nothing to warn about.
+    f.compile(&format!(
+        "{}\n[memory]\nauto_memory = \"writable\"\n",
+        spec("")
+    ));
+    let settings = fs::read_to_string(f.root.join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("claude/projects"));
+    assert_eq!(status(&f.verify(), "settings-layers"), Status::Pass);
+}

@@ -138,7 +138,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
         sandbox.check,
         push,
         checks::settings::check(ctx, &rendered, opts),
-        checks::layers::check(ctx, &layers, opts),
+        checks::layers::check(ctx, &layers, &spec, opts),
         checks::config::check(ctx, &layers),
         checks::hygiene::check(ctx, &spec, &rendered),
         protection,
