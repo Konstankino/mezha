@@ -67,10 +67,29 @@ pub struct Policy {
     /// Paths agents may not read (gitignore patterns, as in `Read(...)` rules).
     pub deny_reads: Vec<String>,
     /// Skills from outside the repository a person has reviewed: personal
-    /// skills by name, plugin skills as `plugin:skill`. An agent may preload
-    /// only these and the spec's own, and verify warns about any other that
-    /// loads (OWASP AST09).
+    /// skills by name, plugin skills as `plugin:skill`, each optionally
+    /// pinned to the fingerprint verify reports (`name@sha256:<hex>`). An
+    /// agent may preload only these and the spec's own; verify warns about
+    /// any other that loads, and fails when a pinned one changes (OWASP
+    /// AST01, AST07, AST09).
     pub external_skills: Vec<String>,
+}
+
+impl Policy {
+    /// The reviewed external skills, as (name, pinned fingerprint).
+    pub fn external(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.external_skills
+            .iter()
+            .map(|entry| match entry.split_once('@') {
+                Some((name, pin)) => (name, Some(pin)),
+                None => (entry.as_str(), None),
+            })
+    }
+
+    /// Whether `name` is a reviewed external skill.
+    pub fn lists_external(&self, name: &str) -> bool {
+        self.external().any(|(n, _)| n == name)
+    }
 }
 
 impl Default for Policy {

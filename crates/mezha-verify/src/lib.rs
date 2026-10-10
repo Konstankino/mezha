@@ -133,6 +133,7 @@ pub fn verify(ctx: &Ctx, opts: &Options) -> Result<Report, CantRun> {
     if !opts.project_only {
         found.walk_outside(ctx, &layers);
     }
+    found.digests();
 
     let checks = vec![
         sandbox.check,

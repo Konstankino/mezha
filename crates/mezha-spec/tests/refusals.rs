@@ -67,15 +67,23 @@ fn preloaded_skills_must_be_reviewed() {
     );
     assert!(check(&listed).0.is_empty(), "{:#?}", check(&listed).0);
 
+    let pin = format!("sha256:{}", "ab".repeat(32));
+    let pinned = agent.replace(
+        "permissions_ask = [\"git push\"]",
+        &format!("permissions_ask = [\"git push\"]\nexternal_skills = [\"db-migrations@{pin}\"]"),
+    );
+    assert!(check(&pinned).0.is_empty(), "{:#?}", check(&pinned).0);
+
     let bad = agent.replace(
         "permissions_ask = [\"git push\"]",
-        "permissions_ask = [\"git push\"]\nexternal_skills = [\"db migrations\", \"a:b:c\"]",
+        "permissions_ask = [\"git push\"]\nexternal_skills = [\"db migrations\", \"a:b:c\", \"x@md5:1\"]",
     );
     assert_eq!(
         paths(&check(&bad), Severity::Error),
         [
             "policy.external_skills[0]",
             "policy.external_skills[1]",
+            "policy.external_skills[2]",
             "agent.a.skills"
         ]
     );

@@ -30,7 +30,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 | `git push` approval gate (hook) | *Advisory* | It reads command text. Scripts, `python -c` and git aliases get past it; [the tests list the known gaps](crates/mezha-hooks/tests/matcher_table.rs). |
 | `permissions.ask` rules | *Advisory* | Claude Code documents them as not a boundary around a program. |
 | Repository config that runs code (`project-config` in verify) | Integrity | Settings that run a command, install plugins or point Claude's traffic elsewhere, and MCP servers from `.mcp.json`, all run outside the sandbox when a session starts. verify fails on them in the shared settings file and on any approval of every `.mcp.json` server, and warns about servers and about such settings in your local file. |
-| Reviewed skills only (`inventory` in verify) | Integrity | Claude Code prefers a personal skill to a project skill with the same name, so verify fails when one in `~/.claude/skills` shadows the project's. Personal and plugin skills not listed in `policy.external_skills` warn, and an agent may preload only skills the spec defines or lists. |
+| Reviewed skills only (`inventory` in verify) | Integrity | Claude Code prefers a personal skill to a project skill with the same name, so verify fails when one in `~/.claude/skills` shadows the project's. Personal and plugin skills not listed in `policy.external_skills` warn, and an agent may preload only skills the spec defines or lists. A listed skill pinned to its fingerprint (`notes@sha256:...`, as verify prints it) fails when any file in its directory changes. |
 | Audit log under `~/.mezha/audit` | Evidence (boundary on `~/.mezha`) | The gate records every call it decides before it runs, and a second hook records how it ended. Sandboxed commands can't write there and the file tools are denied, so an agent can't rewrite its own record; your own processes can, so it is evidence against the agent, not against you. A call that can't be recorded is blocked. See [Audit log](#audit-log). |
 | Fail-closed hook (`\|\| exit 2`) | Integrity | It keeps the advisory gate from silently vanishing when `mezha` is missing or crashes. |
 | Agent memory is read-only in sessions | **Boundary** (deny rule + sandbox) | A deny rule on all three memory scopes beats Claude Code's own "memory may be written" allowance, and the sandbox can't write there either. Only `mezha dream` changes memory, and a person reviews the diff ([ADR-0004](docs/adr/0004-memory-changes-only-through-dreams.md)). |
@@ -582,7 +582,8 @@ compiler refuses, among other things:
   they reach outside the sandbox without asking);
 - an agent's `skills` entry that is neither a skill in the spec nor listed
   in `policy.external_skills` (personal skills by name, plugin skills as
-  `plugin:skill`), so nothing preloads unreviewed;
+  `plugin:skill`, each optionally pinned as `name@sha256:...` to the
+  fingerprint verify prints), so nothing preloads unreviewed;
 - PHI memory (`class = "phi"`, or a repository listed in `phi_repos`) with
   project or user scope;
 - a knowledge skill whose description is under 40 characters or lacks

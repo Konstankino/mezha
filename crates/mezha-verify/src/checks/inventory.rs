@@ -3,7 +3,9 @@
 //! a personal skill to a project skill with the same name, so a file in
 //! `~/.claude/skills` can replace what the repository reviewed: that
 //! fails. Skills from outside the repository that `policy.external_skills`
-//! doesn't list warn, and so does an enabled plugin verify can't find.
+//! doesn't list warn, and so does an enabled plugin verify can't find. A
+//! listed skill pinned to a fingerprint fails when any file in it changes
+//! (AST01, AST07); one listed without a pin warns, with the pin to add.
 //! Plugin skills are namespaced (`plugin:skill`), and a project agent beats
 //! a personal one, so neither can shadow the project's.
 
@@ -26,6 +28,8 @@ pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
         .collect();
 
     let mut unlisted = Vec::new();
+    let mut unpinned = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for item in skills().filter(|i| i.source != Source::Project) {
         let name = match (&item.plugin, item.source) {
             (Some(id), Source::Plugin) => {
@@ -33,6 +37,9 @@ pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
             }
             _ => item.name.clone(),
         };
+        seen.push(name.clone());
+        let digest = item.digest.as_deref().unwrap_or("-");
+        let listed = spec.policy.external().find(|(n, _)| *n == name);
         if item.source == Source::User && project.contains(&item.name.as_str()) {
             f.fail(
                 format!(
@@ -41,8 +48,20 @@ pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
                 ),
                 "Rename or remove the personal skill.",
             );
-        } else if !spec.policy.external_skills.contains(&name) && !spec.skill.contains_key(&name) {
-            unlisted.push(name);
+        } else if let Some((_, Some(pin))) = listed {
+            if pin != digest {
+                f.fail(
+                    format!(
+                        "skill `{name}` ({}) changed since it was reviewed: pinned {pin}, now {digest}",
+                        item.path.trim_end_matches("/SKILL.md")
+                    ),
+                    "Read what changed; if it is fine, put the new fingerprint in policy.external_skills.",
+                );
+            }
+        } else if listed.is_some() {
+            unpinned.push(format!("{name}@{digest}"));
+        } else if !spec.skill.contains_key(&name) {
+            unlisted.push(format!("{name}@{digest}"));
         }
     }
     if !unlisted.is_empty() {
@@ -54,10 +73,28 @@ pub fn check(inventory: &Inventory, spec: &Spec) -> Check {
                 unlisted.join(", ")
             ),
             Some(
-                "Read each one, then list it in policy.external_skills, or remove or disable it."
+                "Read each one, then list it in policy.external_skills as shown (name@fingerprint), or remove or disable it."
                     .into(),
             ),
         );
+    }
+    if !unpinned.is_empty() {
+        unpinned.sort();
+        f.warn(
+            format!(
+                "external skill(s) listed without a fingerprint, so a change wouldn't be noticed: {}",
+                unpinned.join(", ")
+            ),
+            Some("List them as shown in policy.external_skills.".into()),
+        );
+    }
+    for (name, _) in spec.policy.external() {
+        if inventory.outside && !seen.iter().any(|s| s == name) {
+            f.warn(
+                format!("policy.external_skills lists `{name}`, which doesn't load here"),
+                Some("Remove it, or install the skill.".into()),
+            );
+        }
     }
     for id in &inventory.missing_plugins {
         f.warn(

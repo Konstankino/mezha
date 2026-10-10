@@ -152,8 +152,8 @@ fn policy(spec: &Spec, d: &mut Diagnostics) {
             );
         }
     }
-    for (i, name) in policy.external_skills.iter().enumerate() {
-        if let Some(problem) = external_skill_problem(name) {
+    for (i, (name, pin)) in policy.external().enumerate() {
+        if let Some(problem) = external_skill_problem(name).or_else(|| pin.and_then(pin_problem)) {
             d.error(format!("policy.external_skills[{i}]"), problem, None);
         } else if spec.skill.contains_key(name) {
             d.warn(
@@ -262,6 +262,22 @@ fn external_skill_problem(name: &str) -> Option<String> {
     })
 }
 
+/// A pin is `sha256:` and 64 lowercase hex digits, as verify prints it.
+fn pin_problem(pin: &str) -> Option<String> {
+    let valid = pin.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    });
+    (!valid).then(|| {
+        format!(
+            "`{}` is not a fingerprint: use the `sha256:...` that `mezha verify` reports",
+            pin.escape_debug()
+        )
+    })
+}
+
 /// These strings are pasted into permission rules such as `Read(...)`; a
 /// paren, comma or line break could end the rule and start another.
 fn rule_text_problem(text: &str) -> Option<String> {
@@ -362,7 +378,7 @@ fn agents(spec: &Spec, d: &mut Diagnostics) {
 
         for skill in &agent.skills {
             frontmatter_text(d, &at("skills"), skill);
-            if !spec.skill.contains_key(skill) && !spec.policy.external_skills.contains(skill) {
+            if !spec.skill.contains_key(skill) && !spec.policy.lists_external(skill) {
                 d.error(
                     at("skills"),
                     format!(

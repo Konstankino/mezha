@@ -20,8 +20,10 @@ use crate::layers::Layers;
 pub const MAX_FILES: usize = 2000;
 /// Directories deeper than this aren't entered.
 const MAX_DEPTH: usize = 8;
-/// Files bigger than this aren't scanned.
+/// Files bigger than this aren't scanned...
 const MAX_BYTES: u64 = 1024 * 1024;
+/// ...and files bigger than this aren't fingerprinted either.
+const MAX_HASHED: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +79,10 @@ pub struct Item {
     /// Hosts the file links to (AST05: content that can change after review).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<String>,
+    /// For a skill's `SKILL.md`: the fingerprint of its whole directory,
+    /// which `policy.external_skills` can pin (see [`Inventory::digests`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 impl Item {
@@ -93,12 +99,42 @@ pub struct Inventory {
     pub truncated: bool,
     /// Enabled plugins verify couldn't find on disk, as `name@marketplace`.
     pub missing_plugins: Vec<String>,
+    /// The user's and plugins' directories were walked too.
+    pub outside: bool,
 }
 
 impl Inventory {
+    /// Gives each skill's `SKILL.md` item the fingerprint of its directory:
+    /// SHA-256 over a line per file, `<path in the directory> NUL <file
+    /// fingerprint or ->`, sorted by path. Any change to any file in the
+    /// skill, a resource or a script, changes it.
+    pub fn digests(&mut self) {
+        let dirs: Vec<(usize, String)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.kind == ItemKind::Skill)
+            .filter_map(|(n, i)| Some((n, i.path.strip_suffix("SKILL.md")?.to_string())))
+            .collect();
+        for (n, dir) in dirs {
+            let mut lines: Vec<String> = self
+                .items
+                .iter()
+                .filter_map(|i| {
+                    let rel = i.path.strip_prefix(&dir)?;
+                    Some(format!("{rel}\0{}\n", i.sha256.as_deref().unwrap_or("-")))
+                })
+                .collect();
+            lines.sort();
+            let digest = mezha_broker::sha256_hex(lines.concat().as_bytes());
+            self.items[n].digest = Some(format!("sha256:{digest}"));
+        }
+    }
+
     /// Adds what loads from outside the repository: the user's own agents,
     /// skills, rules and commands, and those of every enabled plugin.
     pub fn walk_outside(&mut self, ctx: &Ctx, layers: &Layers) {
+        self.outside = true;
         let none = BTreeMap::new();
         let (config, shown) = match ctx.var("CLAUDE_CONFIG_DIR") {
             Some(dir) => (PathBuf::from(dir), dir.trim_end_matches('/').to_string()),
@@ -256,6 +292,7 @@ impl Inventory {
             findings: Vec::new(),
             phrases: Vec::new(),
             links: Vec::new(),
+            digest: None,
         };
         scan_file(&base.join(rel), &mut item);
         self.items.push(item);
@@ -273,12 +310,24 @@ fn scan_file(path: &Path, item: &mut Item) {
         Err(e) => return incomplete(item, &format!("can't be read ({e})")),
     };
     if meta.file_type().is_symlink() {
+        // Where it points is what a pin can hold on to.
+        let target = std::fs::read_link(path).unwrap_or_default();
+        let link = format!("symlink:{}", target.display());
+        item.sha256 = Some(format!(
+            "sha256:{}",
+            mezha_broker::sha256_hex(link.as_bytes())
+        ));
         return incomplete(item, "a symlink, not followed");
     }
     if !meta.is_file() {
         return incomplete(item, "not a regular file");
     }
     if meta.len() > MAX_BYTES {
+        if meta.len() <= MAX_HASHED
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            item.sha256 = Some(format!("sha256:{}", mezha_broker::sha256_hex(&bytes)));
+        }
         return incomplete(item, "over 1 MiB, not scanned");
     }
     let bytes = match std::fs::read(path) {
