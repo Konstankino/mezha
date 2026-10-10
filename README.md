@@ -47,6 +47,10 @@ Every security feature is either a boundary or labelled advisory. Today:
 | `mezha approve` refusing inside Claude Code | Speed bump | The boundary is the store's location, not this check. |
 | Anything on native Windows | *Advisory* | No sandbox, and hooks may run in PowerShell 5.1, which can't fail closed. `compile` refuses `os_mode = "native-windows"` until phase 4; use WSL2. |
 
+How these map to the OWASP Agentic Skills Top 10, mitigation by mitigation,
+including what mezha leaves to registries and Claude Code:
+[docs/owasp-ast10.md](docs/owasp-ast10.md).
+
 The sandbox wraps shell commands only. Claude's file tools, WebFetch, MCP
 servers and hooks run outside it: an MCP server with a GitHub token can push
 through the API whatever the sandbox says. Claude Code reads project settings
@@ -726,5 +730,9 @@ verify must fail on live in `crates/mezha-verify/tests/boundary.rs`.
   runs and scheduled dreams.
 - [ADR-0006](docs/adr/0006-skill-eval-own-runner-in-clones.md): skill evals,
   a runner of mezha's own in clones of the project.
+- [ADR-0007](docs/adr/0007-owasp-agentic-skills-top-10.md): conforming to
+  the OWASP Agentic Skills Top 10.
+- [OWASP Agentic Skills Top 10](docs/owasp-ast10.md): every mitigation in
+  AST01–AST10, and what mezha does about it.
 - [Porting inventory](docs/porting-inventory.md): what comes from ocgen, and
   what doesn't.
