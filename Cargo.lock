@@ -380,6 +380,7 @@ name = "mezha-memory"
 version = "0.0.1"
 dependencies = [
  "mezha-broker",
+ "mezha-hooks",
  "mezha-spec",
  "regex",
  "rustix",

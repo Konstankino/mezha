@@ -313,6 +313,21 @@ pub fn body_findings(text: &str, runs_at_load: bool) -> Vec<Finding> {
             .expect("the link pattern is valid")
     });
     add(Level::Phrase, EXTERNAL_REFERENCE, link);
+    for (span, what) in shell_code(text) {
+        let seen = out
+            .iter()
+            .any(|f| f.what == what && f.start < span.end && span.start < f.end);
+        if !seen {
+            out.push(Finding {
+                level: Level::Phrase,
+                what,
+                start: span.start,
+                end: span.end,
+                line: line_of(text, span.start),
+                encoded: false,
+            });
+        }
+    }
     // Rendered Markdown hides HTML comments and tags, and loads images; in
     // code (fenced or inline) they show as written, so they hide nothing.
     let code = code_spans(text);
@@ -322,6 +337,138 @@ pub fn body_findings(text: &str, runs_at_load: bool) -> Vec<Finding> {
     });
     out.sort_by_key(|f| (f.start, std::cmp::Reverse(f.end)));
     out
+}
+
+/// Programs that fetch from the network, run what they are given, or
+/// decode it.
+const DOWNLOADERS: [&str; 7] = [
+    "curl",
+    "wget",
+    "fetch",
+    "aria2c",
+    "http",
+    "xh",
+    "lwp-download",
+];
+const INTERPRETERS: [&str; 16] = [
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "perl", "ruby", "node",
+    "deno", "php", "pwsh", "source", "eval",
+];
+const DECODERS: [&str; 3] = ["base64", "xxd", "openssl"];
+/// Programs that run the command after their own options.
+const WRAPPERS: [&str; 7] = ["sudo", "doas", "env", "exec", "command", "nohup", "time"];
+
+/// Shell in a skill's code, read the way the shell reads it, so `c''url`,
+/// `curl${IFS}-s` or `V=curl; $V` can't hide a download piped into an
+/// interpreter (OWASP AST08). Fenced blocks tagged as shell (or untagged)
+/// and inline code are read a line at a time; a line the reader can't
+/// parse is left to the patterns.
+fn shell_code(text: &str) -> Vec<(std::ops::Range<usize>, &'static str)> {
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let fences = fenced_blocks(text);
+    for block in &fences {
+        let body = &text[block.clone()];
+        let mut rows = body.split_inclusive('\n');
+        let Some(opening) = rows.next() else {
+            continue;
+        };
+        let info = opening
+            .trim()
+            .trim_start_matches(['`', '~'])
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let console = matches!(info.as_str(), "console" | "shell-session" | "terminal");
+        if !(info.is_empty()
+            || console
+            || matches!(info.as_str(), "sh" | "bash" | "shell" | "zsh" | "ksh"))
+        {
+            continue;
+        }
+        let mut at = block.start + opening.len();
+        for row in rows {
+            let line = row.trim_end_matches('\n');
+            let mut command = line.trim_start();
+            let mut lead = line.len() - command.len();
+            if console {
+                for prompt in ["$ ", "% ", "> "] {
+                    if let Some(rest) = command.strip_prefix(prompt) {
+                        command = rest;
+                        lead += prompt.len();
+                    }
+                }
+            }
+            if !command.starts_with("```") && !command.starts_with("~~~") {
+                lines.push((at + lead, command));
+            }
+            at += row.len();
+        }
+    }
+    static INLINE: OnceLock<Regex> = OnceLock::new();
+    let inline = INLINE.get_or_init(|| {
+        Regex::new(r"``([^`\n]+)``|`([^`\n]+)`").expect("the inline code pattern is valid")
+    });
+    for caps in inline.captures_iter(text) {
+        let Some(m) = caps.get(1).or_else(|| caps.get(2)) else {
+            continue;
+        };
+        if !fences.iter().any(|f| f.contains(&m.start())) {
+            lines.push((m.start(), m.as_str()));
+        }
+    }
+    lines
+        .into_iter()
+        .filter_map(|(at, line)| {
+            let what = shell_line(line)?;
+            Some((at..at + line.len(), what))
+        })
+        .collect()
+}
+
+/// What one command line does that a reviewer should see.
+fn shell_line(line: &str) -> Option<&'static str> {
+    let commands = mezha_hooks::shell::parse(line, 0).ok()?;
+    let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_string();
+    let starts_downloader = |w: &str| {
+        DOWNLOADERS
+            .iter()
+            .any(|d| w == *d || w.starts_with(&format!("{d}-")))
+    };
+    let (mut downloads, mut runs, mut decodes) = (false, false, false);
+    for command in &commands {
+        let mut words = command.words.iter().peekable();
+        // Assignments before the program: `V=curl $V ...`.
+        while let Some(word) = words.peek() {
+            let Some((name, value)) = word.text.split_once('=') else {
+                break;
+            };
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                break;
+            }
+            downloads |= DOWNLOADERS.contains(&base(value).as_str());
+            words.next();
+        }
+        let mut program = words.next();
+        while let Some(word) = program
+            && WRAPPERS.contains(&base(&word.text).as_str())
+        {
+            program = words.find(|w| !w.text.starts_with('-') && !w.text.contains('='));
+        }
+        let Some(program) = program else {
+            continue;
+        };
+        let name = base(&program.text);
+        downloads |=
+            DOWNLOADERS.contains(&name.as_str()) || (program.dynamic && starts_downloader(&name));
+        runs |= INTERPRETERS.contains(&name.as_str()) || name == ".";
+        decodes |= DECODERS.contains(&name.as_str());
+    }
+    match (downloads, decodes, runs) {
+        (true, _, true) => Some("download and run"),
+        (_, true, true) => Some("decode and run"),
+        _ => None,
+    }
 }
 
 /// Byte ranges of Markdown code: fenced blocks, and inline spans in one or
@@ -469,6 +616,17 @@ fn folded(text: &str, scan: Scan, out: &mut Vec<Finding>) {
     if !scan.phrases {
         return;
     }
+    let mixed = mixed_script_words(text);
+    for word in &mixed {
+        out.push(Finding {
+            level: Level::Phrase,
+            what: MIXED_SCRIPT,
+            start: word.start,
+            end: word.end,
+            line: line_of(text, word.start),
+            encoded: false,
+        });
+    }
     let mut view = String::with_capacity(text.len());
     // The offset in `text` of each byte of `view`, and of its end.
     let mut at_raw = Vec::with_capacity(text.len() + 1);
@@ -477,9 +635,12 @@ fn folded(text: &str, scan: Scan, out: &mut Vec<Finding>) {
         let c = if is_hidden(c) {
             changed = true;
             continue;
-        } else if ('\u{ff01}'..='\u{ff5e}').contains(&c) {
+        } else if let Some(plain) = plain_letter(c) {
             changed = true;
-            char::from_u32(c as u32 - 0xfee0).unwrap_or(c)
+            plain
+        } else if let Some(plain) = lookalike(c).filter(|_| mixed.iter().any(|w| w.contains(&at))) {
+            changed = true;
+            plain
         } else {
             c
         };
@@ -511,6 +672,104 @@ fn folded(text: &str, scan: Scan, out: &mut Vec<Finding>) {
             }
         }
     }
+}
+
+/// Phrase finding: a word that mixes Latin letters with Cyrillic or Greek
+/// lookalikes, which no language explains (`іgnore` with a Cyrillic `і`).
+pub const MIXED_SCRIPT: &str = "mixed-script word";
+
+/// A letter or digit drawn in another style: fullwidth (`ｉ`), mathematical
+/// (`𝐢`, `𝒾`, `𝟏`) or enclosed (`ⓘ`), as the plain ASCII it stands for.
+fn plain_letter(c: char) -> Option<char> {
+    let n = c as u32;
+    let ascii = |n: u32| char::from_u32(n);
+    match n {
+        0xff01..=0xff5e => ascii(n - 0xfee0),
+        // Mathematical alphanumeric symbols: 13 styles of A-Z, a-z.
+        0x1d400..=0x1d6a3 => {
+            let i = (n - 0x1d400) % 52;
+            ascii(if i < 26 {
+                'A' as u32 + i
+            } else {
+                'a' as u32 + i - 26
+            })
+        }
+        // ...and 5 styles of 0-9.
+        0x1d7ce..=0x1d7ff => ascii('0' as u32 + (n - 0x1d7ce) % 10),
+        0x24b6..=0x24cf => ascii('A' as u32 + n - 0x24b6),
+        0x24d0..=0x24e9 => ascii('a' as u32 + n - 0x24d0),
+        _ => None,
+    }
+}
+
+/// Cyrillic and Greek letters that look like Latin ones.
+fn lookalike(c: char) -> Option<char> {
+    Some(match c {
+        'а' | 'α' => 'a',
+        'е' => 'e',
+        'о' | 'ο' => 'o',
+        'р' | 'ρ' => 'p',
+        'с' => 'c',
+        'у' => 'y',
+        'х' => 'x',
+        'і' | 'ι' => 'i',
+        'ј' => 'j',
+        'ѕ' => 's',
+        'ԁ' => 'd',
+        'һ' => 'h',
+        'ӏ' => 'l',
+        'ԛ' => 'q',
+        'ԝ' => 'w',
+        'ν' => 'v',
+        'κ' => 'k',
+        'υ' => 'u',
+        'А' | 'Α' => 'A',
+        'В' | 'Β' => 'B',
+        'Е' | 'Ε' => 'E',
+        'К' | 'Κ' => 'K',
+        'М' | 'Μ' => 'M',
+        'Н' | 'Η' => 'H',
+        'О' | 'Ο' => 'O',
+        'Р' | 'Ρ' => 'P',
+        'С' => 'C',
+        'Т' | 'Τ' => 'T',
+        'Х' | 'Χ' => 'X',
+        'І' | 'Ι' => 'I',
+        'Ј' => 'J',
+        'Ѕ' => 'S',
+        'Ζ' => 'Z',
+        'Ν' => 'N',
+        'Υ' => 'Y',
+        _ => return None,
+    })
+}
+
+/// Words (letters, with hidden characters inside them) that hold both a
+/// Latin letter and a lookalike from another script.
+fn mixed_script_words(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    let (mut latin, mut other) = (false, false);
+    let mut close = |start: &mut Option<usize>, end: usize, latin: &mut bool, other: &mut bool| {
+        if let Some(s) = start.take()
+            && *latin
+            && *other
+        {
+            words.push(s..end);
+        }
+        (*latin, *other) = (false, false);
+    };
+    for (at, c) in text.char_indices() {
+        if c.is_alphabetic() || is_hidden(c) {
+            start.get_or_insert(at);
+            latin |= c.is_ascii_alphabetic() || plain_letter(c).is_some();
+            other |= lookalike(c).is_some();
+        } else {
+            close(&mut start, at, &mut latin, &mut other);
+        }
+    }
+    close(&mut start, text.len(), &mut latin, &mut other);
+    words
 }
 
 /// Base64 runs that decode to text are scanned again, `ENCODED_DEPTH`
