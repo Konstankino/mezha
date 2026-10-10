@@ -17,7 +17,7 @@ memory: "project"
 hooks:
   PreToolUse:
     - hooks:
-        - command: "mezha hook agent-bash --protocol 1 --allow 'cargo test *' --allow 'cargo build *' || exit 2"
+        - command: "mezha hook agent-bash --protocol 2 --allow 'cargo test *' --allow 'cargo build *' || exit 2"
           shell: "bash"
           type: "command"
       matcher: "Bash|Monitor"

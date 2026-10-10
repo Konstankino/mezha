@@ -14,7 +14,7 @@
       {
         "hooks": [
           {
-            "command": "mezha hook audit-outcome --protocol 1 || exit 2",
+            "command": "mezha hook audit-outcome --protocol 2 || exit 2",
             "shell": "bash",
             "type": "command"
           }
@@ -25,7 +25,7 @@
       {
         "hooks": [
           {
-            "command": "mezha hook audit-outcome --protocol 1 || exit 2",
+            "command": "mezha hook audit-outcome --protocol 2 || exit 2",
             "shell": "bash",
             "type": "command"
           }
@@ -36,7 +36,7 @@
       {
         "hooks": [
           {
-            "command": "mezha hook approval-gate --protocol 1 --gate 'git push' || exit 2",
+            "command": "mezha hook approval-gate --protocol 2 --gate 'git push' || exit 2",
             "shell": "bash",
             "type": "command"
           }

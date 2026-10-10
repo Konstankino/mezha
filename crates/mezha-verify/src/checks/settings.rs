@@ -222,8 +222,7 @@ fn unmanaged_files(ctx: &Ctx, rendered: &Rendered) -> Vec<String> {
 /// Runs the rendered hook command the way Claude Code would, with a scratch
 /// home so no real approval can hide a broken gate.
 fn probe_gate(ctx: &Ctx, settings: &Value, f: &mut Findings) {
-    let install =
-        "Install it: `cargo install --locked --path crates/mezha-cli` in the mezha repository.";
+    let install = "Install it: `cargo install --locked --force --path crates/mezha-cli` in the mezha repository (`--force` replaces an older mezha of the same version).";
     let found = ctx.which_trusted("mezha");
     if let Some(note) = found.skipped_note("mezha") {
         f.warn(note, None);

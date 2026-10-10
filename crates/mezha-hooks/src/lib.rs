@@ -21,10 +21,20 @@ use std::path::{Path, PathBuf};
 
 use mezha_spec::{BashPattern, CommandPrefix, HostPattern};
 
-/// The hook protocol. The generated command passes it with `--protocol`; any
-/// other number means the settings and the binary disagree, and the call is
-/// blocked until `mezha compile` regenerates them.
-pub const PROTOCOL: u32 = 1;
+/// The hook protocol mezha writes into the commands it generates, passed
+/// with `--protocol`. Bump it whenever a hook gains or changes an argument,
+/// or a new hook appears: an older mezha then refuses the command with a
+/// message that names the mismatch, instead of tripping over an argument it
+/// has never seen (ADR-0002).
+///
+/// 1. The approval gate, `agent-bash` and `dream-guard`.
+/// 2. The gate's `--fetch-only` and `--fetch` (`policy.fetch_allow`) and the
+///    `audit-outcome` hook.
+pub const PROTOCOL: u32 = 2;
+
+/// The oldest protocol this mezha still runs, so settings compiled by an
+/// older mezha keep working until the next `mezha compile`.
+pub const OLDEST_PROTOCOL: u32 = 1;
 
 /// Hook input larger than this is refused.
 pub const MAX_INPUT: usize = 1 << 20;
@@ -186,13 +196,41 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
     let Some((name, args)) = argv.split_first() else {
         return Outcome::block("mezha hook: no hook name given");
     };
-    let mut protocol = None;
     let mut gates = Vec::new();
     let mut scopes = Vec::new();
     let mut read: Vec<PathBuf> = Vec::new();
     let mut write: Option<PathBuf> = None;
     let mut fetch_only = false;
     let mut fetch: Vec<HostPattern> = Vec::new();
+    // The protocol first: a newer mezha's command may hold arguments this
+    // one has never heard of, and the mismatch is what to report.
+    let protocol = match args
+        .iter()
+        .position(|a| a == "--protocol")
+        .and_then(|i| args.get(i + 1))
+    {
+        None => return Outcome::block("mezha hook: no --protocol given; run `mezha compile`"),
+        Some(value) => match value.parse::<u32>() {
+            Err(_) => return Outcome::block(format!("mezha hook: bad --protocol `{value}`")),
+            Ok(p) if p > PROTOCOL => {
+                return Outcome::block(format!(
+                    "mezha: these settings were compiled by a newer mezha (hook protocol {p}), \
+                     and this one runs protocol {OLDEST_PROTOCOL} to {PROTOCOL}. Install the \
+                     mezha the project uses (`cargo install --locked --force --path \
+                     crates/mezha-cli` in its repository); until then every call is blocked \
+                     (fail-closed)."
+                ));
+            }
+            Ok(p) if p < OLDEST_PROTOCOL => {
+                return Outcome::block(format!(
+                    "mezha: these settings were compiled for hook protocol {p}, older than this \
+                     mezha runs. Run `mezha compile`; until then every call is blocked \
+                     (fail-closed)."
+                ));
+            }
+            Ok(p) => p,
+        },
+    };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--fetch-only" {
@@ -204,10 +242,7 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
                 Ok(host) => fetch.push(host),
                 Err(e) => return Outcome::block(format!("mezha hook: bad --fetch: {e}")),
             },
-            ("--protocol", Some(value)) => match value.parse::<u32>() {
-                Ok(n) => protocol = Some(n),
-                Err(_) => return Outcome::block(format!("mezha hook: bad --protocol `{value}`")),
-            },
+            ("--protocol", Some(_)) => {}
             ("--gate", Some(value)) => match CommandPrefix::parse(value) {
                 Ok(gate) => gates.push(gate),
                 Err(e) => return Outcome::block(format!("mezha hook: bad --gate: {e}")),
@@ -231,25 +266,21 @@ fn dispatch(argv: &[String], input: &[u8], env: &Env) -> Outcome {
             }
             (other, _) => {
                 return Outcome::block(format!(
-                    "mezha hook: unexpected argument `{other}`; run `mezha compile` to regenerate the hook"
+                    "mezha hook: unexpected argument `{other}`: the hook command was edited, or \
+                     another mezha compiled it with the same protocol. Check that `mezha \
+                     --version` is the mezha the project uses, then run `mezha compile`."
                 ));
             }
         }
     }
-    match protocol {
-        None => return Outcome::block("mezha hook: no --protocol given; run `mezha compile`"),
-        Some(p) if p != PROTOCOL => {
-            return Outcome::block(format!(
-                "mezha: this hook was generated for hook protocol {p}, but this mezha speaks \
-                 protocol {PROTOCOL}. Run `mezha compile` with the mezha the project uses; \
-                 until then every call is blocked (fail-closed)."
-            ));
-        }
-        Some(_) => {}
-    }
     // Each hook takes its own flags; any other flag means the command was
     // edited or generated by another mezha.
     let fetching = fetch_only || !fetch.is_empty();
+    if protocol < 2 && (fetching || name == audit::NAME) {
+        return Outcome::block(format!(
+            "mezha hook: {name} with these arguments needs hook protocol 2, but the command says {protocol}; run `mezha compile`"
+        ));
+    }
     let foreign = match name.as_str() {
         approval_gate::NAME => {
             !scopes.is_empty() || !read.is_empty() || write.is_some() || (!fetch_only && fetching)
@@ -297,7 +328,7 @@ mod tests {
         ];
         assert_eq!(
             command_line(&gates, None),
-            "mezha hook approval-gate --protocol 1 --gate 'git push' --gate 'terraform apply' || exit 2"
+            "mezha hook approval-gate --protocol 2 --gate 'git push' --gate 'terraform apply' || exit 2"
         );
     }
 
@@ -307,7 +338,10 @@ mod tests {
         for args in [
             argv(&[]),
             argv(&["approval-gate"]),
-            argv(&["approval-gate", "--protocol", "2"]),
+            argv(&["approval-gate", "--protocol", "3"]),
+            argv(&["approval-gate", "--protocol", "0"]),
+            argv(&["audit-outcome", "--protocol", "1"]),
+            argv(&["approval-gate", "--protocol", "1", "--fetch-only"]),
             argv(&["approval-gate", "--protocol", "x"]),
             argv(&["approval-gate", "--protocol"]),
             argv(&["approval-gate", "--protocol", "1", "--gate", "git push; rm"]),
@@ -339,5 +373,48 @@ mod tests {
             let out = run(&args, b"{}", &env);
             assert!(out.is_block(), "{args:?}: {out:?}");
         }
+    }
+
+    #[test]
+    fn protocols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env::new([("HOME", tmp.path().to_str().unwrap())], 1_800_000_000);
+        let event = br#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{}}"#;
+        // Settings an older mezha compiled keep working.
+        let out = run(
+            &argv(&["approval-gate", "--protocol", "1", "--gate", "git push"]),
+            event,
+            &env,
+        );
+        assert_eq!(out, Outcome::allow());
+        // A newer mezha's command is refused for what it is, before any
+        // argument this one doesn't know.
+        let out = run(
+            &argv(&["approval-gate", "--protocol", "3", "--future-flag", "x"]),
+            event,
+            &env,
+        );
+        assert!(
+            out.stderr
+                .contains("compiled by a newer mezha (hook protocol 3)"),
+            "{out:?}"
+        );
+        assert!(out.stderr.contains("--force"), "{out:?}");
+        let out = run(
+            &argv(&["approval-gate", "--protocol", "2", "--future-flag", "x"]),
+            event,
+            &env,
+        );
+        assert!(
+            out.stderr
+                .contains("the hook command was edited, or another mezha"),
+            "{out:?}"
+        );
+        let out = run(
+            &argv(&["approval-gate", "--protocol", "1", "--fetch-only"]),
+            event,
+            &env,
+        );
+        assert!(out.stderr.contains("needs hook protocol 2"), "{out:?}");
     }
 }

@@ -51,7 +51,7 @@ pub fn print(root: &Path, kind: &str) -> Result<ExitCode> {
             why.push_str(&format!(" ({note})"));
         }
         bail!(
-            "{why}; install it with `cargo install --locked --path crates/mezha-cli`, which puts it in ~/.cargo/bin"
+            "{why}; install it with `cargo install --locked --force --path crates/mezha-cli`, which puts it in ~/.cargo/bin"
         );
     };
     let running = std::env::current_exe().and_then(std::fs::canonicalize).ok();

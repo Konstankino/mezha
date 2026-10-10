@@ -67,12 +67,18 @@ Not here yet: the approval broker with short-lived tokens.
 From source, until releases exist:
 
 ```bash
-cargo install --path crates/mezha-cli
+cargo install --locked --force --path crates/mezha-cli
 ```
+
+`--force` matters when you update: without it, cargo keeps an installed
+mezha of the same version.
 
 `mezha` must be on `PATH` on every machine that runs Claude Code in a mezha
 project, and in CI. The hook fails closed: without the binary, every tool
-call is blocked.
+call is blocked. The hook command carries a protocol number. A newer mezha
+still runs the commands an older one compiled, until the next `mezha
+compile`. An older mezha refuses a newer one's commands and says to
+install the mezha the project uses: update it before you compile.
 
 ## Quickstart
 

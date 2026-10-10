@@ -318,7 +318,7 @@ fn an_agent_s_bash_scope_is_enforced_by_its_hook() {
         .expect("the agent has a hook");
     let command: String = serde_json::from_str(line).unwrap();
     assert!(
-        command.starts_with("mezha hook agent-bash --protocol 1 --allow 'cargo test *'"),
+        command.starts_with("mezha hook agent-bash --protocol 2 --allow 'cargo test *'"),
         "{command}"
     );
 

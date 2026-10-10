@@ -181,7 +181,7 @@ fn command_quotes_paths() {
     .unwrap();
     assert_eq!(
         cmd,
-        "'/opt/me/bin/mezha' hook dream-guard --protocol 1 --read '/home/o'\\''brien/wt' --write '/home/o'\\''brien/.mezha/dreams/k/s/staged/r' || exit 2"
+        "'/opt/me/bin/mezha' hook dream-guard --protocol 2 --read '/home/o'\\''brien/wt' --write '/home/o'\\''brien/.mezha/dreams/k/s/staged/r' || exit 2"
     );
     assert!(
         dream_guard_command(
