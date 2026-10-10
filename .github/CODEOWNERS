@@ -1,0 +1,7 @@
+# What agents are told, what they may do and what they remember: changes
+# here need a code owner's review once the default branch requires it
+# (README, "Dreams"; docs/owasp-ast10.md, AST02 and AST09).
+/mezha.toml @konstankinollc
+/mezha/ @konstankinollc
+/.claude/ @konstankinollc
+/.github/ @konstankinollc

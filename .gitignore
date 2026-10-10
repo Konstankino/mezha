@@ -1,3 +1,5 @@
 /target
 .DS_Store
 /ci/srt/node_modules
+# Personal Claude Code instructions stay on this machine.
+CLAUDE.local.md
