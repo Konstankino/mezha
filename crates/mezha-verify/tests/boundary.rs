@@ -1863,3 +1863,48 @@ fn ast_config_a_local_server_without_authentication_fails() {
         detail(&r, "project-config")
     );
 }
+
+#[test]
+fn git_config_count_from_mezhas_own_guard_rail_is_not_the_users() {
+    let f = Fixture::new("", GITHUB);
+    let with = |vars: &[(&str, &str)]| {
+        let mut ctx = f.ctx(Platform::Linux);
+        for (k, v) in vars {
+            ctx.vars.insert(k.to_string(), v.to_string());
+        }
+        verify(&ctx, &Options::default()).unwrap()
+    };
+    // Inside a mezha session: the settings' env, and what Claude Code's
+    // sandbox appends after it.
+    for vars in [
+        &[
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "credential.helper"),
+            ("GIT_CONFIG_VALUE_0", ""),
+        ][..],
+        &[
+            ("GIT_CONFIG_COUNT", "3"),
+            ("GIT_CONFIG_KEY_0", "credential.helper"),
+            ("GIT_CONFIG_VALUE_0", ""),
+            ("GIT_CONFIG_KEY_1", "safe.directory"),
+            ("GIT_CONFIG_VALUE_1", "/w/repo"),
+            ("GIT_CONFIG_KEY_2", "safe.directory"),
+            ("GIT_CONFIG_VALUE_2", "/w/repo/*"),
+        ][..],
+    ] {
+        let r = with(vars);
+        assert!(
+            !detail(&r, "settings-layers").contains("GIT_CONFIG_COUNT"),
+            "{vars:?}: {}",
+            detail(&r, "settings-layers")
+        );
+    }
+    // The user's own entries would be lost: still a warning.
+    let r = with(&[
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "core.editor"),
+        ("GIT_CONFIG_VALUE_0", "vim"),
+    ]);
+    assert_eq!(status(&r, "settings-layers"), Status::Warn);
+    assert!(detail(&r, "settings-layers").contains("GIT_CONFIG_COUNT is set in your environment"));
+}

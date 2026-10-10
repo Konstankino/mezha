@@ -101,7 +101,25 @@ pub fn check(ctx: &Ctx, layers: &Layers, spec: &Spec, opts: &Options) -> Check {
             );
         }
     }
-    if !opts.project_only && ctx.var("GIT_CONFIG_COUNT").is_some() {
+    // Inside a mezha session entry 0 is mezha's own guard rail, set from the
+    // settings' `env`, and Claude Code's sandbox may append entries of its
+    // own after it (`safe.directory`): nothing of the user's is lost then.
+    let entry = |n: usize| {
+        let get = |what: &str| {
+            ctx.vars
+                .get(&format!("GIT_CONFIG_{what}_{n}"))
+                .map(String::as_str)
+        };
+        (get("KEY"), get("VALUE"))
+    };
+    let guard = |key: &str| {
+        GIT_GUARD_ENV
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+    };
+    let own_guard = entry(0) == (guard("GIT_CONFIG_KEY_0"), guard("GIT_CONFIG_VALUE_0"));
+    if !opts.project_only && ctx.var("GIT_CONFIG_COUNT").is_some() && !own_guard {
         f.warn(
             "GIT_CONFIG_COUNT is set in your environment; inside Claude Code mezha's guard rail replaces it, so its entries are lost",
             None,
