@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use mezha_broker::approvals;
-use mezha_spec::{CommandPrefix, HostPattern};
+use mezha_spec::{CommandPrefix, HostPattern, url_host};
 use serde_json::{Map, Value};
 
 use crate::audit;
@@ -142,28 +142,6 @@ fn gate_fetch(input: Option<&Map<String, Value>>, hosts: &[HostPattern]) -> Outc
     }
 }
 
-/// The host of an http(s) URL, lowercased, as a browser would read it:
-/// a backslash ends the authority like a slash, and userinfo and the port
-/// are dropped. Anything unusual (percent-encoding, spaces, non-ASCII) is
-/// refused rather than guessed at.
-pub(crate) fn url_host(url: &str) -> Option<String> {
-    let (scheme, rest) = url.trim().split_once("://")?;
-    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return None;
-    }
-    let authority = rest.split(['/', '\\', '?', '#']).next()?;
-    let host_port = authority.rsplit('@').next()?;
-    let host = match host_port.strip_prefix('[') {
-        Some(v6) => v6.split(']').next()?,
-        None => host_port.split(':').next()?,
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    let plain = host
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == ':');
-    (!host.is_empty() && plain).then_some(host)
-}
-
 /// `CLAUDE_PROJECT_DIR`, else the event's `cwd`.
 pub(crate) fn project_dir(env: &Env, event: &Map<String, Value>) -> Option<PathBuf> {
     env.var("CLAUDE_PROJECT_DIR")
@@ -242,36 +220,4 @@ fn store_path<'a>(
             };
             within(&resolve(&path), &store)
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::url_host;
-
-    #[test]
-    fn hosts_of_urls() {
-        let host = |u: &str| url_host(u);
-        assert_eq!(host("https://Docs.RS/x?y#z").as_deref(), Some("docs.rs"));
-        assert_eq!(
-            host("http://user:pw@a.example.com:8080/").as_deref(),
-            Some("a.example.com")
-        );
-        assert_eq!(host("https://[::1]:443/").as_deref(), Some("::1"));
-        // A backslash ends the authority, as in a browser.
-        assert_eq!(
-            host("https://evil.example\\@docs.rs/").as_deref(),
-            Some("evil.example")
-        );
-        assert_eq!(host("https://docs.rs.").as_deref(), Some("docs.rs"));
-        for bad in [
-            "ftp://docs.rs",
-            "docs.rs",
-            "https://",
-            "https://ev%2Eil.com/",
-            "https://dócs.rs",
-            "https://a b.com",
-        ] {
-            assert_eq!(host(bad), None, "{bad}");
-        }
-    }
 }

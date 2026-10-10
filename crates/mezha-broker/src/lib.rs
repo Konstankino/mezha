@@ -4,6 +4,13 @@
 //! own terminal, which writes an expiry outside the project, where sandboxed
 //! agent commands can't write. The loopback credential helper and short-lived
 //! tokens arrive in phase 1 (`mezha-plan.md`, section 3.5).
+//!
+//! A requirement for that helper (OWASP AST06, ADR-0007): any interface the
+//! broker opens on this machine authenticates every caller, with a secret
+//! the sandbox can't read or with the peer's credentials on a Unix socket,
+//! and never trusts the source address. A web page reaches localhost too,
+//! and so does every process of the user's. `mezha verify` already fails on
+//! a project MCP server that listens there without authentication.
 
 pub mod approvals;
 mod repo;

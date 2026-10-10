@@ -14,7 +14,7 @@ mod tools;
 mod validate;
 
 pub use bash_pattern::BashPattern;
-pub use host::{HostPattern, host_matches};
+pub use host::{HostPattern, host_matches, url_host};
 pub use model::{
     Agent, AgentMemory, AutoMemory, BODY_DIR, Capability, DEFAULT_DREAM_BUDGET_USD,
     DEFAULT_DREAM_MAX_TURNS, DEFAULT_DREAM_MODEL, DreamPolicy, DreamSchedule, Effort, HumanGate,

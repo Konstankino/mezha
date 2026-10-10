@@ -1833,3 +1833,33 @@ fn ast_links_outside_fetch_allow_fail() {
         detail(&r, "bodies")
     );
 }
+
+#[test]
+fn ast_config_a_local_server_without_authentication_fails() {
+    let f = Fixture::new("", GITHUB);
+    let mcp = |servers: Value| {
+        f.write_json(&f.root.join(".mcp.json"), json!({ "mcpServers": servers }));
+        f.verify()
+    };
+    let r = mcp(json!({
+        "notes": { "type": "http", "url": "http://127.0.0.1:7777/mcp" },
+        "board": { "type": "sse", "url": "ws://localhost:9000/events" },
+    }));
+    assert_eq!(status(&r, "project-config"), Status::Fail);
+    let d = detail(&r, "project-config");
+    assert!(d.contains("server `notes` is on this machine at http://127.0.0.1:7777/mcp and takes calls without authentication"), "{d}");
+    assert!(d.contains("server `board`"), "{d}");
+    // With a token, or remote, or over stdio: only the usual warning.
+    let r = mcp(json!({
+        "notes": { "type": "http", "url": "http://127.0.0.1:7777/mcp",
+                   "headers": { "Authorization": "Bearer ${NOTES_TOKEN}" } },
+        "tracker": { "type": "http", "url": "https://mcp.tracker.example/" },
+        "fs": { "command": "npx", "args": ["fs-mcp"] },
+    }));
+    assert_eq!(
+        status(&r, "project-config"),
+        Status::Warn,
+        "{}",
+        detail(&r, "project-config")
+    );
+}

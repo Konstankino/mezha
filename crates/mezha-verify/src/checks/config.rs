@@ -6,7 +6,9 @@
 //! fails; in your local settings it warns, since that file is yours. User
 //! settings aren't the repository's, so only one thing counts there:
 //! approving every server in `.mcp.json`, which fails anywhere but managed
-//! settings, since a later commit could add one.
+//! settings, since a later commit could add one. A server on this machine
+//! that takes calls without authentication fails too (AST06): a web page
+//! can reach localhost.
 
 use serde_json::Value;
 
@@ -152,6 +154,14 @@ pub fn check(ctx: &Ctx, layers: &Layers) -> Check {
     if let Ok(text) = std::fs::read_to_string(&mcp) {
         match serde_json::from_str::<Value>(&text) {
             Ok(v) => {
+                for (name, why) in unauthenticated_local(&v) {
+                    f.fail(
+                        format!(
+                            ".mcp.json server `{name}` is on this machine at {why} and takes calls without authentication: any local process, or a web page that reaches localhost, can call its tools (OWASP AST06)"
+                        ),
+                        "Give it a token (`headers` with Authorization, or `headersHelper`), or run it over stdio.",
+                    );
+                }
                 let mut servers: Vec<String> = v
                     .pointer("/mcpServers")
                     .and_then(Value::as_object)
@@ -182,6 +192,45 @@ pub fn check(ctx: &Ctx, layers: &Layers) -> Check {
         check,
         "no MCP servers, command-running settings or redirecting env",
     )
+}
+
+/// `.mcp.json` servers reached over HTTP or WebSocket on this machine
+/// (loopback, `localhost`, or every interface) that send no credentials,
+/// with their URL.
+fn unauthenticated_local(mcp: &Value) -> Vec<(String, String)> {
+    let Some(servers) = mcp.pointer("/mcpServers").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (name, server) in servers {
+        let Some(url) = server.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let as_http = url
+            .strip_prefix("ws://")
+            .map(|r| format!("http://{r}"))
+            .or_else(|| url.strip_prefix("wss://").map(|r| format!("https://{r}")))
+            .unwrap_or_else(|| url.to_string());
+        let Some(host) = mezha_spec::url_host(&as_http) else {
+            continue;
+        };
+        let local = host == "localhost"
+            || host.ends_with(".localhost")
+            || host.starts_with("127.")
+            || host == "::1"
+            || host == "0.0.0.0";
+        let headers = server.get("headers").and_then(Value::as_object);
+        let token = headers.is_some_and(|h| {
+            h.keys().any(|k| {
+                let k = k.to_ascii_lowercase();
+                k == "authorization" || k == "x-api-key" || k == "proxy-authorization"
+            })
+        }) || server.get("headersHelper").is_some();
+        if local && !token {
+            found.push((name.clone(), url.to_string()));
+        }
+    }
+    found
 }
 
 /// Servers approved in `enabledMcpjsonServers`, minus the rejected ones.
