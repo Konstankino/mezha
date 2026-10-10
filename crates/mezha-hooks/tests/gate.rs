@@ -424,3 +424,44 @@ fn webfetch_stays_inside_fetch_allow() {
     edited.extend(["--fetch".to_string(), "docs.rs".to_string()]);
     assert!(fetch(&edited, "https://docs.rs/").is_block());
 }
+
+#[test]
+fn records_link_a_subagent_to_the_call_that_spawned_it() {
+    let f = Fixture::new();
+    let argv: Vec<String> = ["audit-outcome", "--protocol", &PROTOCOL.to_string()]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // The main thread spawns a subagent...
+    let mut spawn = tool(
+        "Agent",
+        json!({ "subagent_type": "explorer", "prompt": "look" }),
+    );
+    spawn["session_id"] = json!("s");
+    spawn["prompt_id"] = json!("p1");
+    spawn["tool_use_id"] = json!("toolu_a");
+    assert_eq!(f.fire(spawn.clone()), Outcome::allow());
+    // ...whose own call carries its agent_id...
+    let mut inner = tool("Read", json!({ "file_path": "x" }));
+    inner["session_id"] = json!("s");
+    inner["prompt_id"] = json!("p1");
+    inner["tool_use_id"] = json!("toolu_b");
+    inner["agent_id"] = json!("a42");
+    inner["agent_type"] = json!("explorer");
+    assert_eq!(f.fire(inner), Outcome::allow());
+    // ...and the Agent call's result names the run it started.
+    let mut done = spawn;
+    done["hook_event_name"] = json!("PostToolUse");
+    done["tool_response"] =
+        json!({ "status": "completed", "agentId": "a42", "content": "found it" });
+    run(&argv, done.to_string().as_bytes(), &f.env());
+
+    let records = audit(&f);
+    let (parent, child, outcome) = (&records[0], &records[1], &records[2]);
+    assert_eq!(parent["prompt_id"], "p1");
+    assert_eq!(child["prompt_id"], "p1");
+    assert_eq!(child["agent_id"], "a42");
+    assert_eq!(outcome["attempt_id"], parent["attempt_id"]);
+    assert_eq!(outcome["spawned_agent_id"], child["agent_id"]);
+    assert!(!serde_json::to_string(outcome).unwrap().contains("found it"));
+}

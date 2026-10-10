@@ -246,6 +246,12 @@ runs (OWASP Agentic Skills Top 10, AST09):
   later, or a gap in the log.
 - `attempt_id` is the SHA-256 of the fields `preimage` names, joined by a
   NUL, so you can recompute it from the transcript.
+- Calls link up as far as Claude Code lets hooks see: `prompt_id` names
+  the user prompt every call came from, a subagent's calls carry its
+  `agent_id`, and the outcome of the Agent call that started it carries the
+  same id as `spawned_agent_id`. Hooks get no reference to the spawning call
+  before a subagent's calls run, so the admission can't name its parent
+  itself; the join goes through the outcome.
 - No content: tool input becomes a digest, since it can hold secrets or
   PHI. The session transcript keeps the content.
 - If a record can't be written, the gate blocks the call, like every other

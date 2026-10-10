@@ -65,8 +65,11 @@ fn common(kind: &str, event: &Map<String, Value>, raw: &[u8], env: &Env) -> Map<
     r.insert("type".into(), json!(kind));
     r.insert("attempt_id".into(), json!(id));
     r.insert("preimage".into(), preimage);
+    // `prompt_id` ties every call to the user prompt that started it, and
+    // `agent_id` to the subagent run that made it.
     for key in [
         "session_id",
+        "prompt_id",
         "tool_use_id",
         "agent_id",
         "agent_type",
@@ -173,6 +176,20 @@ pub fn outcome(input: &[u8], env: &Env) -> Outcome {
     r.insert("terminal_state".into(), json!(state));
     if event.get("is_interrupt") == Some(&Value::Bool(true)) {
         r.insert("interrupted".into(), json!(true));
+    }
+    // The Agent tool's result names the subagent run it started, whose
+    // calls carry it as `agent_id`: the link from a subagent's records back
+    // to the call that spawned it. Claude Code gives hooks no parent
+    // reference before the call runs, so it can't be in the admission.
+    if matches!(
+        event.get("tool_name").and_then(Value::as_str),
+        Some("Agent" | "Task")
+    ) && let Some(id) = event
+        .get("tool_response")
+        .and_then(|r| r.get("agentId"))
+        .and_then(Value::as_str)
+    {
+        r.insert("spawned_agent_id".into(), json!(id));
     }
     match append(&home, root.as_deref(), env.now, &Value::Object(r)) {
         Ok(()) => Outcome::allow(),
