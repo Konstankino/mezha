@@ -112,7 +112,13 @@ pub fn denied_domains(egress_allow: &[String]) -> Vec<&'static str> {
 /// `(path, is_dir)`. The sandbox hides them from shell commands and a
 /// `Read(...)` deny rule hides them from the Read tool, which runs outside
 /// the sandbox. `mezha verify` checks against the same list (ADR-0003).
-pub const CREDENTIAL_FILES: [(&str, bool); 25] = [
+///
+/// The last entry is for WSL2, where the Windows user profiles are mounted
+/// and hold the same files for Windows git, gh and ssh (`.ssh`,
+/// `.git-credentials`, `_netrc`, `AppData/Roaming/GitHub CLI`); the user's
+/// name isn't known here, so the whole tree is withheld. Elsewhere the
+/// path doesn't exist. A project kept there can't be read: verify says so.
+pub const CREDENTIAL_FILES: [(&str, bool); 26] = [
     ("~/.ssh", true),
     ("~/.gnupg", true),
     ("~/.aws", true),
@@ -138,6 +144,7 @@ pub const CREDENTIAL_FILES: [(&str, bool); 25] = [
     ("~/.terraform.d/credentials.tfrc.json", false),
     ("~/.pulumi/credentials.json", false),
     ("~/.vault-token", false),
+    ("/mnt/c/Users", true),
 ];
 
 /// Environment variables removed from sandboxed commands: tokens, and the

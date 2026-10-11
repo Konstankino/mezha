@@ -19,7 +19,7 @@ Every security feature is either a boundary or labelled advisory. Today:
 
 | Feature | Kind | Why |
 |---|---|---|
-| Credentials withheld from sandboxed commands (`sandbox.credentials`) | **Boundary** (sandbox on) | The OS hides the known credential files and token variables from the agent's shell commands. |
+| Credentials withheld from sandboxed commands (`sandbox.credentials`) | **Boundary** (sandbox on) | The OS hides the known credential files and token variables from the agent's shell commands; on WSL2 that includes the Windows user profiles under `/mnt/c/Users`, so keep the project in the Linux file system. |
 | Forge hosts kept out of `egress_allow` | **Boundary** (sandbox on) | The sandbox proxy refuses hosts that aren't allowed, so a push can't connect. On macOS this is the only push boundary: the sandbox can't hide the keychain. |
 | Forge write hosts in `deniedDomains` | **Boundary** (sandbox on) | Claude Code refuses them for sandboxed commands in every permission mode, with no "allow" prompt: neither a click, nor `bypassPermissions`, nor auto mode's classifier opens them. Other hosts outside the allowlist stay closed only while a session asks you, and verify warns about them. |
 | Sandbox `filesystem.denyWrite` on `~/.mezha` | **Boundary** (sandbox on) | The OS stops sandboxed commands from writing the approval store, so an agent can't approve itself. |

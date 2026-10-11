@@ -316,7 +316,7 @@ compile.**
 |---|---|
 | macOS | Full: Seatbelt sandbox. The keychain can't be hidden from the sandbox, so keep forge hosts out of `egress_allow` (section 12). |
 | Linux | Full: bubblewrap sandbox. Needs `bwrap` (and `socat`). |
-| WSL2 | Full, like Linux. |
+| WSL2 | Full, like Linux. The Windows user profiles under `/mnt/c/Users` are withheld too, so keep the project in the Linux file system. |
 | WSL1 | No sandbox: verify fails. |
 | Native Windows | Refused by `compile` until phase 4: no sandbox, and Windows PowerShell 5.1 can't fail closed. Use WSL2. |
 
@@ -1016,7 +1016,7 @@ beat allow rules and Claude Code's own allowances:
                   "./.claude/agent-memory-local", "~/.claude/agent-memory"]
   },
   "credentials": {
-    "files":   [ { "path": "~/.ssh", "mode": "deny" }, "… 25 paths …" ],
+    "files":   [ { "path": "~/.ssh", "mode": "deny" }, "… 26 paths …" ],
     "envVars": [ { "name": "GH_TOKEN", "mode": "deny" }, "… 29 variables …" ]
   }
 }
@@ -1037,11 +1037,14 @@ beat allow rules and Claude Code's own allowances:
 - `filesystem.denyWrite`: what sandboxed commands may never write, on top
   of the files Claude Code itself protects (`.claude/settings*.json`,
   `.claude/agents`, `.claude/skills`, `.claude/commands`, `.mcp.json`).
-- `credentials`: 25 credential files and directories (`~/.ssh`, `~/.gnupg`,
+- `credentials`: 26 credential files and directories (`~/.ssh`, `~/.gnupg`,
   `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.config/gh`,
   `~/.config/glab-cli`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`,
   `~/.cargo/credentials*`, `~/.pypirc`, `~/.docker/config.json`,
-  `~/.vault-token`, ...) hidden from sandboxed commands, and 29 variables
+  `~/.vault-token`, ..., and `/mnt/c/Users`, the Windows user profiles that
+  WSL2 mounts, where Windows git, gh and ssh keep the same files; the user's
+  name isn't known at compile time, so the whole tree goes, and a project
+  kept there fails verify) hidden from sandboxed commands, and 29 variables
   removed from their environment (`GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`,
   `AWS_*`, `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `PYPI_TOKEN`,
   `SSH_AUTH_SOCK`, VS Code's git askpass handles, `WSL_INTEROP`, ...).
@@ -1588,6 +1591,8 @@ Is Claude Code's sandbox on, strict and available?
   not that nested namespace, so Claude Code's sandbox fails to start or runs
   without the filter; WSL1 and native Windows fail;
 - Claude Code at least 2.1.246;
+- on WSL, the project isn't under `/mnt/c/Users`, which compile withholds
+  from sandboxed commands as the Windows user profiles;
 - the project is the git root (Claude Code reads project settings from the
   directory it starts in).
 

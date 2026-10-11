@@ -95,7 +95,8 @@
       "Read(~/.gem/credentials)",
       "Read(~/.terraform.d/credentials.tfrc.json)",
       "Read(~/.pulumi/credentials.json)",
-      "Read(~/.vault-token)"
+      "Read(~/.vault-token)",
+      "Read(/mnt/c/Users/**)"
     ]
   },
   "sandbox": {
@@ -319,6 +320,10 @@
         {
           "mode": "deny",
           "path": "~/.vault-token"
+        },
+        {
+          "mode": "deny",
+          "path": "/mnt/c/Users"
         }
       ]
     },

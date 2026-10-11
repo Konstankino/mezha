@@ -218,6 +218,10 @@
       {
         "mode": "deny",
         "path": "/home/u/.vault-token"
+      },
+      {
+        "mode": "deny",
+        "path": "/mnt/c/Users"
       }
     ]
   },

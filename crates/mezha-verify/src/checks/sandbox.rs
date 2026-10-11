@@ -134,6 +134,14 @@ pub fn check(ctx: &Ctx, layers: &Layers, claude: Option<&str>, opts: &Options) -
         }
         let git_root = mezha_broker::repo_root(&ctx.root);
         let root = std::fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone());
+        if under_windows_profiles(ctx.platform, &root) {
+            f.fail(
+                format!(
+                    "the project is under {WINDOWS_PROFILES}, the Windows user profiles, which mezha withholds from sandboxed commands: they can't read it"
+                ),
+                "Keep the project in the Linux file system (under ~, for instance), where the sandbox and git permissions also work as they should.",
+            );
+        }
         if git_root != root {
             f.warn(
                 format!(
@@ -266,6 +274,20 @@ fn bubblewrap(ctx: &Ctx, bwrap: &Path, unshare: Option<&Path>, f: &mut Findings)
     }
 }
 
+/// Where WSL mounts the Windows user profiles, which compile withholds
+/// from sandboxed commands as credential directories.
+const WINDOWS_PROFILES: &str = "/mnt/c/Users";
+
+/// On WSL, whether the project sits in the withheld Windows profiles.
+/// drvfs ignores case, so the prefix is compared without it.
+pub fn under_windows_profiles(platform: Platform, root: &Path) -> bool {
+    matches!(platform, Platform::Wsl2 | Platform::Wsl1) && {
+        let root = root.to_string_lossy().to_lowercase();
+        let prefix = WINDOWS_PROFILES.to_lowercase();
+        root == prefix || root.starts_with(&format!("{prefix}/"))
+    }
+}
+
 /// `2.1.285 (Claude Code)` → (2, 1, 285).
 pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     let word = text.split_whitespace().next()?;
@@ -302,7 +324,39 @@ pub fn claude_version(ctx: &Ctx) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use std::path::Path;
+
+    use super::{parse_version, under_windows_profiles};
+    use crate::ctx::Platform;
+
+    #[test]
+    fn windows_profiles_on_wsl() {
+        let under = Path::new("/mnt/c/Users/me/src/app");
+        assert!(under_windows_profiles(Platform::Wsl2, under));
+        assert!(under_windows_profiles(Platform::Wsl1, under));
+        assert!(under_windows_profiles(
+            Platform::Wsl2,
+            Path::new("/mnt/c/users/Me/app")
+        ));
+        assert!(under_windows_profiles(
+            Platform::Wsl2,
+            Path::new("/mnt/c/Users")
+        ));
+        assert!(!under_windows_profiles(
+            Platform::Wsl2,
+            Path::new("/mnt/c/Userspace/app")
+        ));
+        assert!(!under_windows_profiles(
+            Platform::Wsl2,
+            Path::new("/mnt/d/src/app")
+        ));
+        assert!(!under_windows_profiles(
+            Platform::Wsl2,
+            Path::new("/home/me/src/app")
+        ));
+        assert!(!under_windows_profiles(Platform::Linux, under));
+        assert!(!under_windows_profiles(Platform::MacOs, under));
+    }
 
     #[test]
     fn versions() {

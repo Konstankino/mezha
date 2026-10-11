@@ -166,13 +166,20 @@ pub fn inventory(
             candidates.push((Path::new(xdg).join(sub), format!("XDG_CONFIG_HOME/{sub}")));
         }
     }
+    // The Windows user profiles, where Windows git, gh and ssh keep theirs.
+    // compile withholds the whole tree; these show when it doesn't apply.
     if matches!(ctx.platform, Platform::Wsl2 | Platform::Wsl1) {
         for user in std::fs::read_dir("/mnt/c/Users")
             .into_iter()
             .flatten()
             .flatten()
         {
-            for sub in [".git-credentials", ".config/gh", ".ssh"] {
+            for sub in [
+                ".ssh",
+                ".git-credentials",
+                "_netrc",
+                "AppData/Roaming/GitHub CLI",
+            ] {
                 let path = user.path().join(sub);
                 candidates.push((path.clone(), path.display().to_string()));
             }
