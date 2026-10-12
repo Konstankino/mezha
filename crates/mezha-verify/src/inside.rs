@@ -149,6 +149,7 @@ pub fn classify_macos(outcomes: &[Result<(), ErrorKind>]) -> Sockets {
 
 /// System sockets every macOS has, which srt's profile doesn't allow on
 /// its own. A connect that gets through does nothing to them.
+#[cfg(unix)]
 const MACOS_SOCKETS: [&str; 2] = ["/private/var/run/mDNSResponder", "/var/run/syslog"];
 
 #[cfg(unix)]
