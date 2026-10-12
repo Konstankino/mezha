@@ -256,4 +256,23 @@ mod tests {
         );
         assert_eq!(t.share_without_edits(), Some(0.5));
     }
+
+    #[test]
+    fn decided_dreams_keep_their_status_and_stale_ones_are_counted() {
+        let r = row("20261009T030000Z", "p1");
+        assert_eq!(
+            status(&r, &[change(2000, "squash", Some("p1"))], 3000, false),
+            Status::Decided(Outcome::WithoutEdits)
+        );
+        let mut t = DreamTally::default();
+        t.add(&r, Some(status(&r, &[], 1000 + STALE_AFTER + 1, true)));
+        assert_eq!(
+            t,
+            DreamTally {
+                stale: 1,
+                ..DreamTally::default()
+            }
+        );
+        assert_eq!(t.share_without_edits(), None);
+    }
 }

@@ -186,6 +186,25 @@ mod tests {
     }
 
     #[test]
+    fn refuses_input_it_cannot_read() {
+        let huge = vec![b' '; MAX_INPUT + 1];
+        let out = run(&scopes(), &huge);
+        assert!(out.stderr.contains("too large"), "{out:?}");
+        let out = run(&scopes(), b"\xff\xfe");
+        assert!(out.stderr.contains("not UTF-8"), "{out:?}");
+        let post = br#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"}}"#;
+        let out = run(&scopes(), post);
+        assert!(out.stderr.contains("PreToolUse events only"), "{out:?}");
+    }
+
+    #[test]
+    fn a_bare_redirection_has_no_command_to_check() {
+        assert!(!blocked("< input.txt"));
+        assert!(!blocked("cargo test; < input.txt"));
+        assert!(blocked("> notes.md"));
+    }
+
+    #[test]
     fn says_why_and_that_it_is_advisory() {
         let out = run(&scopes(), &event("cargo build"));
         assert!(

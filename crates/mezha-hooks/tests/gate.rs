@@ -465,3 +465,148 @@ fn records_link_a_subagent_to_the_call_that_spawned_it() {
     assert_eq!(outcome["spawned_agent_id"], child["agent_id"]);
     assert!(!serde_json::to_string(outcome).unwrap().contains("found it"));
 }
+
+/// Claude Code lets a crashed hook's call through, so a panic inside the
+/// hook is caught and answered with exit 2 like any other failure.
+#[test]
+fn a_crash_inside_the_hook_blocks() {
+    let f = Fixture::new();
+    f.approve(&f.repo);
+    // A clock at the end of time overflows the approval arithmetic.
+    let mut env = f.env();
+    env.now = u64::MAX;
+    let out = f.fire_with(&env, bash("git push"));
+    assert!(out.is_block(), "{out:?}");
+    if cfg!(debug_assertions) {
+        assert!(out.stderr.contains("the hook crashed"), "{out:?}");
+    }
+}
+
+#[test]
+fn a_command_too_deep_to_read_is_blocked() {
+    let f = Fixture::new();
+    f.approve(&f.repo);
+    let deep = "echo ".to_string() + &"$(".repeat(12) + "ls" + &")".repeat(12);
+    let out = f.fire(bash(&deep));
+    assert!(out.is_block(), "{out:?}");
+    assert!(out.stderr.contains("nests too deeply"), "{out:?}");
+}
+
+#[test]
+fn paths_are_read_against_home_and_the_project() {
+    let f = Fixture::new();
+    // `~` alone is the home directory, not the store inside it.
+    assert_eq!(
+        f.fire(tool("Read", json!({ "file_path": "~" }))),
+        Outcome::allow()
+    );
+    // Without a project directory a relative path is taken as it is.
+    let env = Env::new([("HOME", f.home.to_str().unwrap())], NOW);
+    let relative = tool(
+        "Read",
+        json!({ "file_path": "./no-such-file-for-tests.md" }),
+    );
+    assert_eq!(f.fire_with(&env, relative), Outcome::allow());
+    let store = approvals::store_dir(&f.home).join("x.json");
+    let out = f.fire_with(&env, tool("Edit", json!({ "file_path": store })));
+    assert!(out.is_block(), "{out:?}");
+    // The record of that decision goes to the no-project log.
+    let dir = mezha_hooks::audit::dir(&f.home, None);
+    assert!(dir.ends_with("audit/no-project"), "{}", dir.display());
+    assert!(dir.is_dir(), "{}", dir.display());
+}
+
+#[test]
+fn outcomes_that_cannot_be_read_or_written_never_block() {
+    let f = Fixture::new();
+    let argv: Vec<String> = ["audit-outcome", "--protocol", &PROTOCOL.to_string()]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // The tool has already run: garbage and other events pass unrecorded.
+    assert_eq!(run(&argv, b"not json", &f.env()), Outcome::allow());
+    let pre = bash("ls");
+    assert_eq!(
+        run(&argv, pre.to_string().as_bytes(), &f.env()),
+        Outcome::allow()
+    );
+    assert!(!mezha_hooks::audit::dir(&f.home, Some(&f.repo)).exists());
+    // A record that can't be written is reported on stderr, not blocked.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let store = approvals::mezha_home(&f.home);
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut done = bash("ls");
+        done["hook_event_name"] = json!("PostToolUse");
+        let out = run(&argv, done.to_string().as_bytes(), &f.env());
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(out.code, 0, "{out:?}");
+        assert!(
+            out.stderr.contains("couldn't write the audit log"),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn admissions_name_the_policy_the_project_was_compiled_with() {
+    let f = Fixture::new();
+    let state = f.repo.join(".claude/.mezha-state.json");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    let policy = |text: &str| {
+        std::fs::write(&state, text).unwrap();
+        assert_eq!(f.fire(bash("git status")), Outcome::allow());
+        audit(&f).pop().unwrap()["policy"].clone()
+    };
+    assert_eq!(policy(r#"{"spec":"sha256:abc"}"#), json!("sha256:abc"));
+    assert_eq!(policy(r#"{"spec":1}"#), Value::Null, "not a fingerprint");
+    assert_eq!(policy("not json"), Value::Null);
+    std::fs::remove_file(&state).unwrap();
+    assert_eq!(f.fire(bash("git status")), Outcome::allow());
+    assert_eq!(
+        audit(&f).pop().unwrap()["policy"],
+        Value::Null,
+        "no state file"
+    );
+}
+
+/// Every directory on the way to the log can refuse the record, and a
+/// blocked call reports both reasons.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_audit_log_is_reported_at_every_level() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let lock = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let dir = mezha_hooks::audit::dir(&f.home, Some(&f.repo));
+    let audit_root = dir.parent().unwrap().to_path_buf();
+    let fails_in = |locked: &Path| {
+        lock(locked, 0o500);
+        let out = f.fire(bash("git status"));
+        lock(locked, 0o700);
+        assert!(out.is_block(), "{}: {out:?}", locked.display());
+        assert!(
+            out.stderr.contains("couldn't write the audit log in"),
+            "{}: {out:?}",
+            locked.display()
+        );
+    };
+    // The project's directory can't be created...
+    std::fs::create_dir_all(&audit_root).unwrap();
+    fails_in(&audit_root);
+    // ...or the day's file inside it.
+    std::fs::create_dir_all(&dir).unwrap();
+    fails_in(&dir);
+    lock(&dir, 0o500);
+    let out = f.fire(bash("git push"));
+    lock(&dir, 0o700);
+    assert!(out.stderr.contains("`git push` is gated"), "{out:?}");
+    assert!(
+        out.stderr.contains("couldn't write the audit log either"),
+        "{out:?}"
+    );
+}

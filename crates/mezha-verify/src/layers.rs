@@ -288,6 +288,106 @@ mod tests {
     }
 
     #[test]
+    fn locked_domains_make_the_sandbox_admin_required_too() {
+        let locked = Layers {
+            layers: vec![layer(
+                Scope::Managed,
+                json!({"sandbox": {"network": {"allowManagedDomainsOnly": true}}}),
+            )],
+            ..Layers::default()
+        };
+        assert!(locked.admin_required());
+        let plain = Layers {
+            layers: vec![
+                layer(
+                    Scope::Managed,
+                    json!({"sandbox": {"network": {"allowManagedDomainsOnly": false}}}),
+                ),
+                layer(
+                    Scope::User,
+                    json!({"sandbox": {"allowUnsandboxedCommands": false}}),
+                ),
+            ],
+            ..Layers::default()
+        };
+        assert!(!plain.admin_required());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_and_non_object_files_are_problems() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let user = home.join(".claude/settings.json");
+        std::fs::write(&user, r#"{"a": 1}"#).unwrap();
+        std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(root.join(PROJECT_SETTINGS), "[1, 2]").unwrap();
+        let ctx = Ctx {
+            root: root.clone(),
+            vars: Default::default(),
+            home: Some(home),
+            platform: Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+        let layers = Layers::load(&ctx, false);
+        assert!(layers.layers.is_empty(), "{:?}", layers.layers);
+        let problems = layers.problems.join("\n");
+        assert!(
+            problems.contains("settings.json can't be read"),
+            "{problems}"
+        );
+        assert!(
+            problems.contains(".claude/settings.json is not a JSON object"),
+            "{problems}"
+        );
+        assert!(layers.unchecked.is_empty(), "{:?}", layers.unchecked);
+    }
+
+    #[test]
+    fn a_start_directory_below_the_git_root_reads_both_local_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+        let start = repo.join("sub");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(start.join(".claude")).unwrap();
+        std::fs::write(start.join(LOCAL_SETTINGS), r#"{"a": 1}"#).unwrap();
+        std::fs::write(repo.join(LOCAL_SETTINGS), r#"{"a": 2}"#).unwrap();
+        let ctx = Ctx {
+            root: start.clone(),
+            vars: Default::default(),
+            home: None,
+            platform: Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+        let layers = Layers::load(&ctx, false);
+        let values: Vec<(i64, Scope, &str)> = layers
+            .every("/a")
+            .map(|(v, l)| (v.as_i64().unwrap(), l.scope, l.label.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (
+                    1,
+                    Scope::Local,
+                    start.join(LOCAL_SETTINGS).to_str().unwrap()
+                ),
+                (2, Scope::Local, repo.join(LOCAL_SETTINGS).to_str().unwrap()),
+            ]
+        );
+    }
+
+    #[test]
     fn agent_writable_paths() {
         let layers = Layers {
             layers: vec![

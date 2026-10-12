@@ -141,3 +141,43 @@ fn accepted_false_positives() {
         assert!(hit(command).is_some(), "{command:?}");
     }
 }
+
+#[test]
+fn gates_of_one_word_and_double_dashes() {
+    let gates = [CommandPrefix::parse("terraform").unwrap()];
+    assert_eq!(scan("terraform plan", &gates), Some(Hit::Gate(0)));
+    assert_eq!(scan("cargo test", &gates), None);
+    // `--` ends the options and is skipped like one.
+    assert_eq!(hit("git -- push"), Some(Hit::Gate(0)));
+    // The shell's own long options are skipped on the way to `-c`.
+    assert_eq!(hit("bash --norc -c 'git push'"), Some(Hit::Gate(0)));
+    assert_eq!(hit("bash --norc script.sh"), None);
+}
+
+#[test]
+fn refuses_deep_nesting_through_eval() {
+    let deep = "eval ".repeat(12) + "git push";
+    assert_eq!(hit(&deep), Some(Hit::TooDeep));
+    let shallow = "eval ".repeat(3) + "git push";
+    assert_eq!(hit(&shallow), Some(Hit::Gate(0)));
+}
+
+/// Input the reader can't parse is searched line by line, with quotes
+/// and backslashes dropped.
+#[test]
+fn unreadable_input_is_searched_coarsely() {
+    assert_eq!(hit("echo \"unterminated\ngit status"), None);
+    assert_eq!(hit("echo 'x\ngit push"), Some(Hit::Gate(0)));
+    assert_eq!(hit("mezha approve \"unterminated"), Some(Hit::SelfApproval));
+    assert_eq!(hit("mezha approve --status \"unterminated"), None);
+}
+
+/// A run-time word can stand for an option of a known program, never for
+/// a word of the gate itself when the program is unknown.
+#[test]
+fn run_time_words_are_read_as_options() {
+    assert_eq!(hit("git $flags push"), Some(Hit::Gate(0)));
+    assert_eq!(hit("mezha $flags approve"), Some(Hit::SelfApproval));
+    assert_eq!(hit("$x $y push"), Some(Hit::Gate(0)));
+    assert_eq!(hit("$x $y"), None);
+}

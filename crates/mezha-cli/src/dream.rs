@@ -495,7 +495,13 @@ fn dream(root: &Path, opts: &Options, last: &mut LastRun) -> Result<ExitCode> {
     // Local and user memory: your confirmation, one role at a time.
     let pending = std::mem::take(&mut dream.pending);
     for p in pending {
-        match apply_local(&p, &ws) {
+        let ask = |question: &str| {
+            if !std::io::stdin().is_terminal() {
+                return Ok(false);
+            }
+            super::confirm(question).map_err(|e| e.to_string())
+        };
+        match apply_local(&p, &ws, ask) {
             Ok(true) => {
                 cursors.insert(p.role.clone(), p.through);
                 cursor::store(&cursor_file, &cursors)?;
@@ -1141,10 +1147,14 @@ fn print_review(r: &Review) {
     }
 }
 
-/// Shows a local or user role's diff and applies it on your `y`, after
-/// checking the real directory didn't change during the dream. `Ok(false)`
-/// means it wasn't applied.
-fn apply_local(p: &Pending, ws: &Path) -> Result<bool, String> {
+/// Shows a local or user role's diff and applies it when `confirm` says
+/// so (your `y` at a terminal), after checking the real directory didn't
+/// change during the dream. `Ok(false)` means it wasn't applied.
+fn apply_local(
+    p: &Pending,
+    ws: &Path,
+    confirm: impl FnOnce(&str) -> Result<bool, String>,
+) -> Result<bool, String> {
     let now = review::snapshot(&p.dir)?;
     if now != p.original {
         return Err(format!(
@@ -1171,9 +1181,7 @@ fn apply_local(p: &Pending, ws: &Path) -> Result<bool, String> {
         p.dir.display(),
         escape(&diff)
     );
-    let apply = std::io::stdin().is_terminal()
-        && super::confirm(&format!("Apply this to {}?", p.dir.display()))
-            .map_err(|e| e.to_string())?;
+    let apply = confirm(&format!("Apply this to {}?", p.dir.display()))?;
     if !apply {
         let patch = ws.join(format!("{}.patch", p.role));
         mezha_memory::write_private(&patch, diff.as_bytes()).map_err(|e| e.to_string())?;
@@ -1361,5 +1369,60 @@ mod tests {
         assert_eq!(shell_word("mezha/dream-1"), "mezha/dream-1");
         assert_eq!(shell_word("a b"), "'a b'");
         assert_eq!(shell_word("o'b"), "'o'\\''b'");
+    }
+
+    #[test]
+    fn a_confirmed_local_dream_is_applied_file_by_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "# Memory\n").unwrap();
+        std::fs::write(dir.join("OLD.md"), "old\n").unwrap();
+        let change = |name: &str, old: &str, new: Option<&str>| Change {
+            name: name.into(),
+            old: Some(old.into()),
+            new: new.map(str::to_string),
+        };
+        let p = Pending {
+            role: "clinician".into(),
+            scope: Scope::Local,
+            runs: 1,
+            turns: 2,
+            cost_usd: 0.1,
+            dir: dir.clone(),
+            original: review::snapshot(&dir).unwrap(),
+            changes: vec![
+                change("MEMORY.md", "# Memory\n", Some("# Memory\n\n- a lesson\n")),
+                change("OLD.md", "old\n", None),
+            ],
+            changelog: "# Changelog\n".into(),
+            through: 0,
+        };
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+
+        // Declined: a patch for later, nothing touched.
+        assert_eq!(apply_local(&p, &ws, |_| Ok(false)), Ok(false));
+        let patch = std::fs::read_to_string(ws.join("clinician.patch")).unwrap();
+        assert!(patch.contains("+- a lesson\n"), "{patch}");
+        assert!(patch.contains("-old\n"), "{patch}");
+        assert_eq!(read("MEMORY.md"), "# Memory\n");
+
+        // Confirmed: every change, then the changelog.
+        let asked = apply_local(&p, &ws, |question| {
+            assert_eq!(question, format!("Apply this to {}?", dir.display()));
+            Ok(true)
+        });
+        assert_eq!(asked, Ok(true));
+        assert_eq!(read("MEMORY.md"), "# Memory\n\n- a lesson\n");
+        assert!(!dir.join("OLD.md").exists(), "OLD.md wasn't removed");
+        assert_eq!(read("CHANGELOG.md"), "# Changelog\n");
+
+        // The directory has changed since the dream: the diff no longer applies.
+        let err = apply_local(&p, &ws, |_| Ok(true)).unwrap_err();
+        assert!(err.contains("changed during the dream"), "{err}");
+        let err = apply_local(&p, &ws, |_| Err("no terminal".into())).unwrap_err();
+        assert!(err.contains("changed during the dream"), "{err}");
     }
 }

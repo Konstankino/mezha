@@ -376,6 +376,88 @@ mod tests {
     }
 
     #[test]
+    fn a_block_reason_ends_in_exactly_one_newline() {
+        assert_eq!(Outcome::block("why").stderr, "why\n");
+        assert_eq!(Outcome::block("why\n").stderr, "why\n");
+        assert!(Outcome::block("why").is_block());
+        assert!(!Outcome::allow().is_block());
+    }
+
+    #[test]
+    fn bad_option_values_name_the_option() {
+        let env = Env::default();
+        let out = run(
+            &argv(&[
+                "approval-gate",
+                "--protocol",
+                "2",
+                "--fetch-only",
+                "--fetch",
+                "docs.rs:443",
+            ]),
+            b"{}",
+            &env,
+        );
+        assert!(
+            out.stderr
+                .starts_with("mezha hook: bad --fetch: `docs.rs:443` is not a host"),
+            "{out:?}"
+        );
+        let out = run(
+            &argv(&["agent-bash", "--protocol", "2", "--allow", "cargo te*t"]),
+            b"{}",
+            &env,
+        );
+        assert!(
+            out.stderr
+                .starts_with("mezha hook: bad --allow `cargo te*t`: `te*t`"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn agent_bash_takes_its_scopes_from_the_command_line() {
+        let env = Env::default();
+        let args = argv(&[
+            "agent-bash",
+            "--protocol",
+            "2",
+            "--allow",
+            "cargo test *",
+            "--allow",
+            "git status",
+        ]);
+        let event = |command: &str| {
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+            )
+        };
+        assert_eq!(
+            run(&args, event("cargo test -p x").as_bytes(), &env),
+            Outcome::allow()
+        );
+        assert_eq!(
+            run(&args, event("git status").as_bytes(), &env),
+            Outcome::allow()
+        );
+        let out = run(&args, event("cargo build").as_bytes(), &env);
+        assert!(
+            out.stderr.contains(
+                "`cargo build` isn't one of this agent's commands (cargo test *, git status)"
+            ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_process_environment_carries_the_clock() {
+        let env = Env::from_process();
+        assert!(env.now >= 1_700_000_000, "{}", env.now);
+        assert_eq!(env.now_ms / 1000, env.now, "{}", env.now_ms);
+        assert_eq!(env.var("MEZHA_NO_SUCH_VARIABLE_FOR_TESTS"), None);
+    }
+
+    #[test]
     fn protocols() {
         let tmp = tempfile::tempdir().unwrap();
         let env = Env::new([("HOME", tmp.path().to_str().unwrap())], 1_800_000_000);

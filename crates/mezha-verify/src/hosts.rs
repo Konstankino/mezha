@@ -271,6 +271,42 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_and_other_schemes_get_their_default_port() {
+        let r = Remote::parse("http://git.example.com/o/r.git");
+        assert_eq!(
+            (r.scheme, r.host.as_str(), r.port, r.has_secret),
+            (Scheme::Http, "git.example.com", 80, false)
+        );
+        let r = Remote::parse("HTTP://user@git.example.com:8080/o/r.git");
+        assert_eq!((r.port, r.has_secret), (8080, true), "{r:?}");
+        let r = Remote::parse("git://github.com/o/r.git");
+        assert_eq!((r.scheme, r.port), (Scheme::Other, 0), "{r:?}");
+    }
+
+    #[test]
+    fn a_colon_after_a_slash_or_at_the_start_is_not_a_host() {
+        // The colon comes after a slash: a local path with a colon in it.
+        let r = Remote::parse("dir/sub:name");
+        assert_eq!((r.scheme, r.host.as_str()), (Scheme::Local, ""), "{r:?}");
+        // Nothing before the colon.
+        let r = Remote::parse(":path");
+        assert_eq!((r.scheme, r.host.as_str()), (Scheme::Local, ""), "{r:?}");
+    }
+
+    #[test]
+    fn bracketed_ipv6_hosts_are_split_from_their_port() {
+        assert_eq!(split_port("[::1]:8443"), ("::1", Some(8443)));
+        assert_eq!(split_port("[fe80::1]"), ("fe80::1", None));
+        assert_eq!(split_port("[::1]:x"), ("::1", None));
+        // An unclosed bracket is read like any other host:port.
+        assert_eq!(split_port("[::1"), ("[:", Some(1)));
+        assert_eq!(split_port("h:notaport"), ("h:notaport", None));
+        // An IPv6 host isn't a plain name, so the remote as a whole is Other.
+        let r = Remote::parse("https://[::1]:8443/o/r.git");
+        assert_eq!((r.scheme, r.host.as_str()), (Scheme::Other, ""), "{r:?}");
+    }
+
+    #[test]
     fn urls_that_run_commands_or_read_as_options_are_other() {
         for url in [
             "ext::sh -c touch% /tmp/pwned",

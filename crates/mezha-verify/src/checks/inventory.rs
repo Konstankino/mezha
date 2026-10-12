@@ -154,3 +154,36 @@ pub fn check(inventory: &Inventory, spec: &Spec, rendered: &Rendered, evals: &La
         ),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::last_evals;
+
+    #[test]
+    fn last_evals_keep_the_newest_complete_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("skill-evals.jsonl"),
+            concat!(
+                "{\"v\":1,\"skill\":\"fmt\",\"stamp\":\"20270102T000000Z\",\"skill_sha\":\"sha256:new\"}\n",
+                "{\"v\":1,\"skill\":\"fmt\",\"stamp\":\"20270101T000000Z\",\"skill_sha\":\"sha256:old\"}\n",
+                "{\"v\":1,\"skill\":\"fmt\",\"stamp\":\"20270103T000000Z\"}\n",
+                "{\"v\":1,\"skill\":\"lint\",\"stamp\":\"20270101T000000Z\",\"skill_sha\":\"sha256:l\"}\n",
+                "not json\n",
+            ),
+        )
+        .unwrap();
+        let last = last_evals(tmp.path());
+        assert_eq!(
+            last.get("fmt"),
+            Some(&("20270102T000000Z".to_string(), "sha256:new".to_string())),
+            "{last:?}"
+        );
+        assert_eq!(
+            last.get("lint").map(|(stamp, _)| stamp.as_str()),
+            Some("20270101T000000Z"),
+            "{last:?}"
+        );
+        assert!(last_evals(&tmp.path().join("missing")).is_empty());
+    }
+}

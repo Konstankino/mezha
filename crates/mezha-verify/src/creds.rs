@@ -449,6 +449,8 @@ fn store_file(helper: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layers::{Layer, Layers, Scope};
+    use serde_json::json;
 
     fn ctx(platform: Platform) -> Ctx {
         Ctx {
@@ -460,6 +462,386 @@ mod tests {
             mezha_exe: None,
             agent_writable: Vec::new(),
         }
+    }
+
+    /// A context whose home is a scratch directory, with `vars` on top.
+    fn ctx_at(home: &Path, platform: Platform, vars: &[(&str, &str)]) -> Ctx {
+        Ctx {
+            home: Some(home.to_path_buf()),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..ctx(platform)
+        }
+    }
+
+    fn cfg(entries: &[(&str, &str)]) -> GitConfig {
+        let text: String = entries
+            .iter()
+            .map(|(k, v)| format!("global\0file:/h/.gitconfig\0{k}\n{v}\0"))
+            .collect();
+        GitConfig::parse(&text)
+    }
+
+    fn layers(scope: Scope, value: Value) -> Layers {
+        Layers {
+            layers: vec![Layer {
+                scope,
+                label: format!("{scope:?}"),
+                value,
+            }],
+            ..Layers::default()
+        }
+    }
+
+    #[test]
+    fn deny_read_paths_count_unless_the_filesystem_sandbox_is_off() {
+        let c = ctx(Platform::Linux);
+        let settings = json!({
+            "sandbox": {
+                "filesystem": { "denyRead": ["~/private", "secrets", "//etc/keys"] },
+                "credentials": {
+                    "files": [{ "path": "~/.netrc", "mode": "deny" }, { "path": "~/x", "mode": "mask" }],
+                    "envVars": [{ "name": "GH_TOKEN", "mode": "deny" }, { "name": "X", "mode": "mask" }]
+                }
+            }
+        });
+        let w = Withheld::from_layers(&c, &layers(Scope::User, settings.clone()));
+        let paths: Vec<String> = w.paths.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/nonexistent-home/.netrc",
+                "/nonexistent-home/private",
+                "/work/repo/secrets",
+                "/etc/keys"
+            ]
+        );
+        assert_eq!(w.env, ["GH_TOKEN"]);
+        assert!(!w.sockets_open);
+
+        // With the filesystem sandbox off in user settings, no path is withheld.
+        let mut off = settings.clone();
+        off["sandbox"]["filesystem"]["disabled"] = json!(true);
+        let w = Withheld::from_layers(&c, &layers(Scope::User, off.clone()));
+        assert!(w.paths.is_empty(), "{:?}", w.paths);
+        assert_eq!(w.env, ["GH_TOKEN"]);
+        // From the repository, Claude Code ignores it.
+        let w = Withheld::from_layers(&c, &layers(Scope::Local, off));
+        assert_eq!(w.paths.len(), 4, "{:?}", w.paths);
+    }
+
+    #[test]
+    fn sockets_count_as_open_only_where_the_setting_takes_effect() {
+        let c = ctx(Platform::Linux);
+        let all = json!({ "sandbox": { "network": { "allowAllUnixSockets": true } } });
+        assert!(Withheld::from_layers(&c, &layers(Scope::User, all.clone())).sockets_open);
+        let some = json!({ "sandbox": { "network": { "allowUnixSockets": ["/run/x"] } } });
+        assert!(Withheld::from_layers(&c, &layers(Scope::Local, some)).sockets_open);
+        // A repository setting under an admin-required sandbox doesn't loosen.
+        let locked = Layers {
+            layers: vec![
+                Layer {
+                    scope: Scope::Local,
+                    label: "local".into(),
+                    value: all,
+                },
+                Layer {
+                    scope: Scope::Managed,
+                    label: "managed".into(),
+                    value: json!({ "sandbox": { "allowUnsandboxedCommands": false } }),
+                },
+            ],
+            ..Layers::default()
+        };
+        assert!(!Withheld::from_layers(&c, &locked).sockets_open);
+    }
+
+    #[test]
+    fn the_inventory_reads_the_environment_and_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let ghcfg = tmp.path().join("ghcfg");
+        let xdg = tmp.path().join("xdg");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&ghcfg).unwrap();
+        std::fs::create_dir_all(xdg.join("hub")).unwrap();
+        std::fs::write(home.join(".netrc"), "machine h login u password p\n").unwrap();
+        std::fs::write(ghcfg.join("hosts.yml"), "github.com:\n    user: me\n").unwrap();
+        let vars = [
+            ("GH_TOKEN", "t"),
+            ("GITHUB_TOKEN", "withheld"),
+            ("MY_GITLAB_PASSWORD", "p"),
+            ("EMPTY_GITHUB_TOKEN", ""),
+            ("SSH_AUTH_SOCK", "/run/agent"),
+            ("GH_CONFIG_DIR", ghcfg.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ];
+        let withheld = Withheld {
+            env: vec!["GITHUB_TOKEN".into()],
+            sockets_open: true,
+            ..Withheld::default()
+        };
+        let inv = inventory(
+            &ctx_at(&home, Platform::MacOs, &vars),
+            &withheld,
+            None,
+            false,
+        );
+        assert_eq!(
+            inv.reachable,
+            [
+                "environment variable GH_TOKEN",
+                "environment variable MY_GITLAB_PASSWORD",
+                "~/.netrc (not withheld from the sandbox)",
+                "GH_CONFIG_DIR (not withheld from the sandbox)",
+                "XDG_CONFIG_HOME/hub (not withheld from the sandbox)",
+                "gh's token in the macOS keychain, which the sandbox can't hide",
+            ]
+        );
+        assert_eq!(
+            inv.unknown,
+            [
+                "SSH_AUTH_SOCK (unix sockets are allowed)",
+                "git's configuration couldn't be read",
+            ]
+        );
+        assert!(inv.gh_logged_in);
+        assert_eq!(
+            inv.checked,
+            ["environment", "credential files", "git config"]
+        );
+
+        // On a platform without a keychain or keyring to speak of, a login
+        // without a token in the file adds nothing.
+        let inv = inventory(
+            &ctx_at(&home, Platform::Windows, &vars[5..6]),
+            &Withheld::default(),
+            None,
+            false,
+        );
+        assert!(inv.gh_logged_in);
+        assert!(
+            !inv.reachable.iter().any(|r| r.contains("gh's token")),
+            "{:?}",
+            inv.reachable
+        );
+        // A token in the hosts file itself is a file, not a keychain entry.
+        std::fs::write(
+            ghcfg.join("hosts.yml"),
+            "github.com:\n    oauth_token: gho_x\n",
+        )
+        .unwrap();
+        let inv = inventory(
+            &ctx_at(&home, Platform::MacOs, &vars[5..6]),
+            &Withheld::default(),
+            None,
+            false,
+        );
+        assert!(inv.gh_logged_in);
+        assert!(
+            !inv.reachable.iter().any(|r| r.contains("gh's token")),
+            "{:?}",
+            inv.reachable
+        );
+        // Withheld, the same file doesn't count.
+        let withheld = Withheld {
+            paths: vec![home.join(".netrc")],
+            ..Withheld::default()
+        };
+        let inv = inventory(&ctx_at(&home, Platform::Linux, &[]), &withheld, None, false);
+        assert!(inv.reachable.is_empty(), "{:?}", inv.reachable);
+        assert!(
+            inventory(&ctx(Platform::Linux), &withheld, None, true)
+                .checked
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_inventory_reads_git_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let git = cfg(&[
+            ("remote.origin.url", "https://x:tok@github.com/o/r.git"),
+            ("http.extraheader", "AUTHORIZATION: basic x"),
+            ("core.askpass", "/usr/bin/ask"),
+            ("credential.helper", "osxkeychain"),
+            ("credential.helper", "mystery"),
+        ]);
+        let inv = inventory(
+            &ctx_at(&home, Platform::Linux, &[]),
+            &Withheld::default(),
+            Some(&git),
+            false,
+        );
+        assert_eq!(
+            inv.reachable,
+            [
+                "a credential written into a remote URL in git config",
+                "http.extraHeader in git config (often an auth header)",
+            ]
+        );
+        assert_eq!(
+            inv.unknown,
+            ["core.askPass in git config", "credential helper `mystery`"]
+        );
+        assert_eq!(
+            inv.checked,
+            [
+                "environment",
+                "credential files",
+                "git config",
+                "credential helpers"
+            ]
+        );
+    }
+
+    #[test]
+    fn store_helper_files() {
+        assert_eq!(
+            store_helper_file("store --file=/x/creds").as_deref(),
+            Some("/x/creds")
+        );
+        assert_eq!(
+            store_helper_file("git-credential-store --file /y").as_deref(),
+            Some("/y")
+        );
+        assert_eq!(
+            store_helper_file("/usr/libexec/git-core/git-credential-store --file=~/z").as_deref(),
+            Some("~/z")
+        );
+        assert_eq!(store_helper_file("store"), None);
+        assert_eq!(store_helper_file("cache --file=/x"), None);
+        assert_eq!(store_helper_file("!f() { :; }; f --file=/x"), None);
+    }
+
+    #[test]
+    fn manager_on_linux_depends_on_its_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".password-store")).unwrap();
+        let c = ctx_at(&home, Platform::Linux, &[]);
+        let with = |store: &str| {
+            classify_helper(
+                "manager",
+                &c,
+                &Withheld::default(),
+                &cfg(&[("credential.credentialstore", store)]),
+                false,
+            )
+        };
+        assert!(matches!(with("secretservice"), Reach::Unknown(_)));
+        assert!(matches!(with("cache"), Reach::Unknown(_)));
+        let gpg = with("gpg");
+        let Reach::Reachable(why) = &gpg else {
+            panic!("{gpg:?}");
+        };
+        assert!(
+            why.contains("gpg store") && why.contains(".password-store is not withheld"),
+            "{why}"
+        );
+        // The plaintext store's file isn't there.
+        assert_eq!(with("plaintext"), Reach::Withheld);
+        std::fs::create_dir_all(home.join(".gcm")).unwrap();
+        assert!(matches!(with("plaintext"), Reach::Reachable(_)));
+        // Withheld by the settings, it has nothing to give.
+        let withheld = Withheld {
+            paths: vec![home.join(".gcm")],
+            ..Withheld::default()
+        };
+        assert_eq!(
+            classify_helper(
+                "manager-core",
+                &c,
+                &withheld,
+                &cfg(&[("credential.credentialstore", "plaintext")]),
+                false
+            ),
+            Reach::Withheld
+        );
+        let unknown = with("something-else");
+        assert!(
+            matches!(&unknown, Reach::Unknown(why) if why.contains("unknown credential store")),
+            "{unknown:?}"
+        );
+        // WSL without Windows interop reads like Linux.
+        let wsl = ctx_at(&home, Platform::Wsl2, &[]);
+        assert!(matches!(
+            classify_helper(
+                "manager",
+                &wsl,
+                &Withheld::default(),
+                &GitConfig::default(),
+                false
+            ),
+            Reach::Unknown(_)
+        ));
+        assert_eq!(classify("manager", Platform::Windows), Reach::Withheld);
+    }
+
+    #[test]
+    fn store_with_a_file_and_the_remaining_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let creds = home.join("creds");
+        std::fs::write(&creds, "https://x:t@h\n").unwrap();
+        let c = ctx_at(&home, Platform::Linux, &[]);
+        let helper = format!("store --file={}", creds.display());
+        let reach = classify_helper(
+            &helper,
+            &c,
+            &Withheld::default(),
+            &GitConfig::default(),
+            false,
+        );
+        let Reach::Reachable(why) = &reach else {
+            panic!("{reach:?}");
+        };
+        assert_eq!(
+            why,
+            &format!(
+                "credential helper store: {} is not withheld from the sandbox",
+                creds.display()
+            )
+        );
+        assert_eq!(
+            classify_helper(
+                "store --file ~/missing",
+                &c,
+                &Withheld::default(),
+                &GitConfig::default(),
+                false
+            ),
+            Reach::Withheld
+        );
+        assert!(matches!(
+            classify("wincred", Platform::Wsl2),
+            Reach::Unknown(_)
+        ));
+        assert_eq!(classify("wincred", Platform::Linux), Reach::Withheld);
+        assert_eq!(classify("libsecret", Platform::MacOs), Reach::Withheld);
+        assert_eq!(classify("gnome-keyring", Platform::MacOs), Reach::Withheld);
+        assert!(matches!(
+            classify("gnome-keyring", Platform::Windows),
+            Reach::Unknown(_)
+        ));
+        // gh: nothing without a login; a keyring question elsewhere than macOS.
+        assert_eq!(
+            classify_helper("gh", &c, &Withheld::default(), &GitConfig::default(), false),
+            Reach::Withheld
+        );
+        assert!(matches!(
+            classify_helper("gh", &c, &Withheld::default(), &GitConfig::default(), true),
+            Reach::Unknown(_)
+        ));
+        assert!(matches!(
+            classify("!gh auth git-credential", Platform::Linux),
+            Reach::Unknown(_)
+        ));
     }
 
     fn classify(helper: &str, platform: Platform) -> Reach {

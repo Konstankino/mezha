@@ -3,10 +3,13 @@
 //! session still running, and a sibling project that isn't ours.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use mezha_memory::transcripts::project_sources;
+use mezha_memory::time::format_iso;
+use mezha_memory::transcripts::{project_dir_name, project_sources};
 use mezha_metrics::sessions::{SessionRow, extract};
+use serde_json::{Value, json};
 
 fn sessions() -> Vec<SessionRow> {
     let projects = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/projects");
@@ -54,4 +57,75 @@ fn reads_the_projects_sessions() {
 
     // Still running: no cost yet, and no guess.
     assert_eq!(all[2].cost_usd, None);
+}
+
+fn at(n: i64) -> String {
+    format_iso(1_800_000_000 + n)
+}
+
+fn write(path: &Path, lines: &[Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn subagents_without_times_or_that_cannot_be_read_are_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(tmp.path()).unwrap();
+    let root = base.join("proj");
+    fs::create_dir_all(&root).unwrap();
+    let cwd = root.to_string_lossy().into_owned();
+    let dir = base.join("projects").join(project_dir_name(&cwd));
+    let file = dir.join("s9.jsonl");
+    write(
+        &file,
+        &[
+            json!({"type": "user", "uuid": "u1", "sessionId": "s9", "cwd": cwd, "timestamp": at(0),
+                   "message": {"role": "user", "content": "Fix it"}}),
+            json!({"type": "assistant", "uuid": "a1", "sessionId": "s9", "timestamp": at(1),
+                   "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "Done."}],
+                               "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        ],
+    );
+    let subagents = dir.join("s9/subagents");
+    let agent = |name: &str, lines: &[Value]| -> PathBuf {
+        let path = subagents.join(format!("agent-{name}.jsonl"));
+        write(&path, lines);
+        write(
+            &subagents.join(format!("agent-{name}.meta.json")),
+            &[json!({"agentType": "implementer"})],
+        );
+        path
+    };
+    let run = [
+        json!({"type": "user", "uuid": "y1", "timestamp": at(2),
+               "message": {"role": "user", "content": "Add a test"}}),
+        json!({"type": "assistant", "uuid": "y2", "timestamp": at(3),
+               "message": {"id": "m2", "role": "assistant",
+                           "content": [{"type": "text", "text": "Done.\n\n## Unresolved\n- one"}],
+                           "usage": {"input_tokens": 10, "output_tokens": 5}}}),
+    ];
+    agent("ok", &run);
+    agent(
+        "untimed",
+        &[json!({"type": "user", "uuid": "x1", "message": {"role": "user", "content": "x"}})],
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = agent("locked", &run);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let roles = BTreeSet::from(["implementer".to_string()]);
+    let row = extract(&file, std::slice::from_ref(&cwd), &roles).unwrap();
+    let runs: Vec<(&str, u64, u64, u32)> = row
+        .runs
+        .iter()
+        .map(|r| (r.id.as_str(), r.tokens_in, r.tokens_out, r.unresolved))
+        .collect();
+    assert_eq!(runs, [("ok", 10, 5, 1)]);
+    assert_eq!((row.prompts, row.cost_usd), (1, None));
+    assert_eq!(extract(&file, &["/elsewhere".to_string()], &roles), None);
 }

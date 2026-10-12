@@ -10,7 +10,7 @@ mod metrics;
 mod schedule;
 mod skill_eval;
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::LazyLock;
@@ -483,13 +483,19 @@ fn diff(root: &Path) -> Result<ExitCode> {
 }
 
 fn confirm(question: &str) -> Result<bool> {
-    if !std::io::stdin().is_terminal() {
+    let stdin = std::io::stdin();
+    confirm_with(question, stdin.is_terminal(), &mut stdin.lock())
+}
+
+/// [`confirm`], with the answer read from `input` when it is a terminal.
+fn confirm_with(question: &str, is_terminal: bool, input: &mut impl BufRead) -> Result<bool> {
+    if !is_terminal {
         bail!("{question} Needs a terminal to ask; pass --yes to proceed without asking.");
     }
     print!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    input.read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
@@ -501,12 +507,38 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::project_name;
+    use super::{confirm_with, project_name};
 
     #[test]
     fn project_names_from_directories() {
         assert_eq!(project_name("Client X"), "client-x");
         assert_eq!(project_name("my_repo.git"), "my-repo-git");
         assert_eq!(project_name("--"), "");
+    }
+
+    #[test]
+    fn confirm_takes_a_yes_only_from_a_terminal() {
+        for (answer, yes) in [
+            ("y\n", true),
+            ("Y\n", true),
+            ("yes\n", true),
+            (" yes \n", true),
+            ("n\n", false),
+            ("yes please\n", false),
+            ("\n", false),
+            ("", false),
+        ] {
+            let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
+            assert_eq!(
+                confirm_with("Go?", true, &mut input).unwrap(),
+                yes,
+                "{answer:?}"
+            );
+        }
+        let err = confirm_with("Go?", false, &mut std::io::empty()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Go? Needs a terminal to ask; pass --yes to proceed without asking."
+        );
     }
 }

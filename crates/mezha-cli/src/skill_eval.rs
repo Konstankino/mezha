@@ -782,4 +782,53 @@ mod tests {
         assert_eq!(l.used, ["Read", "Bash", "WebFetch"]);
         assert_eq!(l.undeclared, ["Bash outside its scopes", "WebFetch"]);
     }
+
+    #[test]
+    fn events_and_blocks_of_other_kinds_are_ignored() {
+        let mut l = Loads::new("probe", &[]);
+        l.see(&assistant(
+            "m1",
+            None,
+            &[("t1", "Skill", json!({"skill": "probe"}))],
+        ));
+        // A text block in a user message, and a result nobody waits for.
+        l.see(&json!({"type": "user", "message": {"content": [
+            {"type": "text", "text": "hi"},
+            {"type": "tool_result", "tool_use_id": "t9", "content": "x"}]}}));
+        assert_eq!(l.loaded_at, None);
+        l.see(&result("t1", None));
+        assert_eq!(l.loaded_at, Some(1));
+        // An event of another type with a message, and one without.
+        l.see(&json!({"type": "system", "message": {"content": []}}));
+        l.see(&json!({"type": "result"}));
+        // A tool use without a name, after the load.
+        l.see(&json!({"type": "assistant", "message": {"id": "m2",
+            "content": [{"type": "tool_use", "id": "t2", "input": {}}]}}));
+        assert!(l.used.is_empty(), "{:?}", l.used);
+        assert!(l.undeclared.is_empty(), "{:?}", l.undeclared);
+    }
+
+    #[test]
+    fn bash_without_declared_scopes_is_undeclared_as_a_whole() {
+        let mut l = Loads::new("probe", &["Read".to_string()]);
+        l.see(&assistant(
+            "m1",
+            None,
+            &[("t1", "Skill", json!({"skill": "probe"}))],
+        ));
+        l.see(&result("t1", None));
+        let bash = |c: &str| json!({ "command": c });
+        l.see(&assistant(
+            "m2",
+            None,
+            &[
+                ("t2", "Bash", bash("ls")),
+                // A command the shell parser can't read is undeclared too.
+                ("t3", "Bash", bash("echo \"unterminated")),
+            ],
+        ));
+        assert_eq!(l.used, ["Bash"]);
+        assert_eq!(l.undeclared, ["Bash"]);
+        assert!(!l.bash_declared("echo \"unterminated"));
+    }
 }

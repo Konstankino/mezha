@@ -434,6 +434,129 @@ mod tests {
     }
 
     #[test]
+    fn platform_names_and_what_each_has() {
+        let all = [
+            Platform::MacOs,
+            Platform::Linux,
+            Platform::Wsl2,
+            Platform::Wsl1,
+            Platform::Windows,
+            Platform::Other,
+        ];
+        let names: Vec<&str> = all.iter().map(|p| p.as_str()).collect();
+        assert_eq!(
+            names,
+            ["macos", "linux", "wsl2", "wsl1", "windows", "other"]
+        );
+        let sandboxed: Vec<bool> = all.iter().map(|p| p.has_sandbox()).collect();
+        assert_eq!(sandboxed, [true, true, true, false, false, false]);
+        let folding: Vec<bool> = all.iter().map(|p| p.folds_case()).collect();
+        assert_eq!(folding, [true, false, false, false, true, false]);
+    }
+
+    #[test]
+    fn managed_settings_live_where_the_platform_puts_them() {
+        let none = BTreeMap::new();
+        let dir = |p: Platform, vars: &BTreeMap<String, String>| {
+            default_managed_dir(p, vars).map(|d| d.display().to_string())
+        };
+        assert_eq!(
+            dir(Platform::MacOs, &none).as_deref(),
+            Some("/Library/Application Support/ClaudeCode")
+        );
+        for p in [Platform::Linux, Platform::Wsl2, Platform::Wsl1] {
+            assert_eq!(dir(p, &none).as_deref(), Some("/etc/claude-code"), "{p:?}");
+        }
+        assert_eq!(dir(Platform::Other, &none), None);
+        let windows = dir(Platform::Windows, &none).unwrap();
+        assert!(
+            windows.starts_with(r"C:\Program Files") && windows.ends_with("ClaudeCode"),
+            "{windows}"
+        );
+        let vars: BTreeMap<String, String> =
+            [("ProgramFiles".to_string(), r"D:\Apps".to_string())].into();
+        let windows = dir(Platform::Windows, &vars).unwrap();
+        assert!(windows.starts_with(r"D:\Apps"), "{windows}");
+    }
+
+    #[test]
+    fn from_process_reads_this_process() {
+        let c = Ctx::from_process(Path::new("/x/repo"));
+        assert_eq!(c.root, PathBuf::from("/x/repo"));
+        assert_eq!(c.platform, Platform::detect());
+        assert_eq!(
+            c.managed_dir,
+            default_managed_dir(c.platform, &c.vars),
+            "{:?}",
+            c.managed_dir
+        );
+        assert_eq!(c.vars.get("PATH").cloned(), std::env::var("PATH").ok());
+        assert!(c.agent_writable.is_empty());
+    }
+
+    #[test]
+    fn without_a_path_nothing_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = ctx(tmp.path(), &[], &[]);
+        c.vars.remove("PATH");
+        assert_eq!(c.trusted_path(), "");
+        let found = c.which_trusted("git");
+        assert_eq!(
+            (found.path.clone(), found.skipped.clone()),
+            (None, Vec::new()),
+            "{found:?}"
+        );
+        assert_eq!(found.skipped_note("git"), None);
+    }
+
+    #[test]
+    fn a_symlink_into_a_world_writable_directory_is_distrusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("repo");
+        let open = base.join("open");
+        let good = base.join("good");
+        std::fs::create_dir_all(&root).unwrap();
+        tool(&open, "git");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::os::unix::fs::symlink(open.join("git"), good.join("git")).unwrap();
+        let c = ctx(&root, &[&good], &[]);
+        let found = c.which_trusted("git");
+        assert_eq!(found.path, None, "{found:?}");
+        assert_eq!(found.skipped.len(), 1, "{:?}", found.skipped);
+        assert!(
+            found.skipped[0].contains("in a group- or world-writable directory"),
+            "{}",
+            found.skipped[0]
+        );
+    }
+
+    /// A group-writable directory is judged by its group: trusted when the
+    /// group already holds root or is the owner's private group, otherwise
+    /// skipped. Which one depends on the machine's `/etc/group`, so both
+    /// answers are accepted, and nothing else is.
+    #[test]
+    fn a_group_writable_directory_is_judged_by_its_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("repo");
+        let shared = base.join("shared");
+        let git = tool(&shared, "git");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let c = ctx(&root, &[&shared], &[]);
+        let found = c.which_trusted("git");
+        match (&found.path, found.skipped.as_slice()) {
+            (Some(path), []) => assert_eq!(path, &git),
+            (None, [why]) => assert!(
+                why.contains("in a group- or world-writable directory"),
+                "{why}"
+            ),
+            _ => panic!("{found:?}"),
+        }
+    }
+
+    #[test]
     fn trusted_groups() {
         assert!(group_is_trusted(
             Some("admin:*:80:root"),
@@ -464,9 +587,14 @@ mod tests {
         let good = base.join("good");
         std::fs::create_dir_all(&venv).unwrap();
         std::fs::create_dir_all(&good).unwrap();
-        let mut c = ctx(&root, &[&venv, &good], &[]);
+        let nowhere = base.join("nowhere");
+        let mut c = ctx(&root, &[&venv, &good, &nowhere], &[]);
         let path = c.vars["PATH"].clone();
         c.vars.insert("PATH".into(), format!("relative/bin:{path}"));
-        assert_eq!(c.trusted_path(), good.display().to_string());
+        // A directory that doesn't exist can't be written by anyone either.
+        assert_eq!(
+            c.trusted_path(),
+            format!("{}:{}", good.display(), nowhere.display())
+        );
     }
 }

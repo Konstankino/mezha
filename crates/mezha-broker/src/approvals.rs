@@ -171,6 +171,44 @@ mod tests {
         assert_eq!(remaining(home.path(), root, NOW), None, "not JSON");
     }
 
+    #[test]
+    fn revoke_reports_errors_other_than_a_missing_record() {
+        let home = tempfile::tempdir().unwrap();
+        let root = Path::new("/r");
+        // A directory where the record should be can't be removed as a file.
+        fs::create_dir_all(record_path(home.path(), root)).unwrap();
+        let err = revoke(home.path(), root).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
+    fn grant_fails_when_the_store_cannot_be_created() {
+        let home = tempfile::tempdir().unwrap();
+        // A file where `~/.mezha` should be.
+        fs::write(mezha_home(home.path()), "").unwrap();
+        let root = Path::new("/r");
+        assert!(grant(home.path(), root, 5, NOW).is_err());
+        assert_eq!(remaining(home.path(), root, NOW), None);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let home = tempfile::tempdir().unwrap();
+        let root = Path::new("/r");
+        grant(home.path(), root, 5, NOW).unwrap();
+        // A directory takes the record's place, so the final rename fails.
+        let path = record_path(home.path(), root);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(grant(home.path(), root, 5, NOW).is_err());
+        let left: Vec<String> = fs::read_dir(store_dir(home.path()))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [format!("{}.json", root_hash(root))], "{left:?}");
+        assert_eq!(remaining(home.path(), root, NOW), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_store_is_private() {

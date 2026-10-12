@@ -338,6 +338,36 @@ mod tests {
     }
 
     #[test]
+    fn kinds_by_name() {
+        assert_eq!(Kind::parse("launchd"), Some(Kind::Launchd));
+        assert_eq!(Kind::parse("systemd"), Some(Kind::Systemd));
+        assert_eq!(Kind::parse("cron"), Some(Kind::Cron));
+        assert_eq!(Kind::parse("Cron"), None);
+        assert_eq!(Kind::parse(""), None);
+    }
+
+    #[test]
+    fn a_nightly_crontab_line() {
+        let env = env();
+        let s = snippet(
+            Kind::Cron,
+            &job(
+                Path::new("/home/me/proj"),
+                &env,
+                When::Daily { hour: 3, minute: 7 },
+            ),
+        )
+        .unwrap();
+        let line = s.line.unwrap();
+        assert!(
+            line.starts_with("7 3 * * * env PATH=/opt/homebrew/bin:/usr/bin:/bin "),
+            "{line}"
+        );
+        assert!(s.files.is_empty());
+        assert_eq!(s.install, ["crontab -e   # then add the line above"]);
+    }
+
+    #[test]
     fn refusals() {
         let env = env();
         let cron = When::Cron("0 3 * * *".into());

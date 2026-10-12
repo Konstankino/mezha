@@ -1522,4 +1522,468 @@ mod tests {
         assert_eq!(repo("ext::sh -c x"), None);
         assert_eq!(encode("feat/ü x"), "feat%2F%C3%BC%20x");
     }
+
+    /// Each verdict becomes a finding with the right status and wording.
+    #[test]
+    fn verdicts_become_findings() {
+        let repo = Repo {
+            host: "github.com".into(),
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let finding = |verdict: Verdict, branch: Option<&str>, push_failed: bool, warning: &str| {
+            let mut f = Findings::default();
+            let j = Judgement {
+                verdict,
+                branch: branch.map(str::to_string),
+                warnings: if warning.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![warning.to_string()]
+                },
+            };
+            add_verdict(&mut f, &repo, &j, push_failed);
+            let c = f.into_check(new_check(), "");
+            (c.status, c.detail, c.fix.unwrap_or_default())
+        };
+        let (status, detail, _) = finding(
+            Verdict::Unknown("rulesets couldn't be read".into()),
+            Some("main"),
+            false,
+            "",
+        );
+        assert_eq!(status, Status::Warn, "{detail}");
+        assert_eq!(
+            detail,
+            "o/r: protection of `main` is unknown: rulesets couldn't be read"
+        );
+        let (status, detail, _) = finding(Verdict::NoBranch, None, true, "");
+        assert_eq!(status, Status::Skip, "{detail}");
+        assert_eq!(detail, "o/r: the repository has no default branch yet");
+        let (status, detail, _) = finding(Verdict::ReadOnly, Some("main"), true, "");
+        assert_eq!(status, Status::Skip, "{detail}");
+        assert!(detail.contains("read-only access"), "{detail}");
+        let (status, detail, fix) = finding(Verdict::NotLoggedIn, None, false, "");
+        assert_eq!(status, Status::Warn, "{detail}");
+        assert_eq!(
+            detail,
+            "o/r: gh isn't logged in to github.com, so protection is unknown"
+        );
+        assert_eq!(fix, "Run `gh auth login --hostname github.com`.");
+        let (status, detail, fix) = finding(Verdict::Unprotected, None, true, "");
+        assert_eq!(status, Status::Fail, "{detail}");
+        assert_eq!(
+            detail,
+            "o/r: nothing stops a direct push to the default branch, and an agent can push (see push-boundary)"
+        );
+        assert_eq!(fix, PROTECT_FIX);
+        let (status, detail, fix) = finding(
+            Verdict::Bypassable("you can bypass it".into()),
+            Some("main"),
+            false,
+            "",
+        );
+        assert_eq!(status, Status::Warn, "{detail}");
+        assert_eq!(
+            detail,
+            "o/r: you can bypass it, so an agent holding your token could push to `main` directly"
+        );
+        assert_eq!(fix, BYPASS_FIX);
+        // A warning on a protected branch is a warning.
+        let (status, detail, _) = finding(
+            Verdict::Protected,
+            Some("main"),
+            false,
+            "the classic rule allows force pushes",
+        );
+        assert_eq!(status, Status::Warn, "{detail}");
+        assert_eq!(
+            detail,
+            "o/r: `main` can't be pushed to directly, and code owners must review; o/r: the classic rule allows force pushes"
+        );
+    }
+
+    #[test]
+    fn why_each_outcome_failed() {
+        assert_eq!(GhOut::Ok("x".into()).why(), "");
+        assert_eq!(GhOut::NotFound("{}".into()).why(), "not found");
+        assert_eq!(GhOut::NotLoggedIn.why(), "gh isn't logged in");
+        let failed = GhOut::Failed {
+            stdout: String::new(),
+            why: "boom".into(),
+        };
+        assert_eq!(failed.why(), "boom");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_api_classifies_how_gh_went() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let ctx = Ctx {
+            root: dir.to_path_buf(),
+            vars: [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
+            home: None,
+            platform: crate::ctx::Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+        let gh = |body: &str| -> std::path::PathBuf {
+            let path = dir.join("gh");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let call = |program: &Path| {
+            gh_api(
+                &ctx,
+                program,
+                dir,
+                "github.com",
+                false,
+                &["--method", "GET", "meta"],
+            )
+        };
+        let out = call(&dir.join("missing"));
+        assert!(
+            matches!(&out, GhOut::Failed { why, stdout } if why.starts_with("gh couldn't run (") && stdout.is_empty()),
+            "{out:?}"
+        );
+        assert_eq!(call(&gh("echo ok")), GhOut::Ok("ok\n".into()));
+        assert_eq!(call(&gh("exit 4")), GhOut::NotLoggedIn);
+        assert_eq!(
+            call(&gh(
+                "echo '{}'; echo 'gh: Not Found (HTTP 404)' >&2; exit 1"
+            )),
+            GhOut::NotFound("{}\n".into())
+        );
+        // The first non-blank line of stderr says why; partial output is kept.
+        assert_eq!(
+            call(&gh(
+                "echo partial; echo >&2; echo '  ' >&2; echo 'boom happened' >&2; exit 1"
+            )),
+            GhOut::Failed {
+                stdout: "partial\n".into(),
+                why: "boom happened".into(),
+            }
+        );
+        assert_eq!(
+            call(&gh("exit 3")),
+            GhOut::Failed {
+                stdout: String::new(),
+                why: "gh failed".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn allowance_lists_name_users_and_teams_but_not_apps() {
+        let list = serde_json::json!({"nodes": [
+            {"actor": {"__typename": "User", "login": "me"}},
+            {"actor": {"__typename": "Team", "slug": "release", "organization": {"login": "acme"}}},
+            {"actor": {"__typename": "App", "slug": "bot"}},
+            {"actor": {"__typename": "Team", "slug": "nameless"}},
+            {"other": 1}
+        ]});
+        let actors = Actors::read(&list);
+        assert_eq!(actors.users, ["me"]);
+        assert_eq!(actors.teams, [("acme".to_string(), "release".to_string())]);
+        assert_eq!(actors.names("ME", None), Some(true));
+        assert_eq!(actors.names("you", None), None);
+        let mine = [("ACME".to_string(), "Release".to_string())];
+        assert_eq!(actors.names("you", Some(&mine)), Some(true));
+        assert_eq!(actors.names("you", Some(&[])), Some(false));
+        assert_eq!(Actors::default().names("you", None), Some(false));
+    }
+
+    #[test]
+    fn graphql_answers_that_say_nothing() {
+        let mut facts = Facts::default();
+        facts.read_graphql("not json");
+        assert_eq!(facts.permission, None);
+        facts.read_graphql(
+            r#"{"data":{"repository":null},"errors":[{"message":"Could not resolve to a Repository\nmore"}]}"#,
+        );
+        assert_eq!(facts.problems, ["Could not resolve to a Repository"]);
+        assert_eq!(facts.branch, None);
+        facts.read_graphql(r#"{"data":{"repository":{"viewerPermission":"WRITE"}}}"#);
+        assert_eq!(facts.permission.as_deref(), Some("WRITE"));
+        assert_eq!(facts.branch, None);
+        // A branch whose rule is missing from the answer stays unknown.
+        facts.read_graphql(
+            r#"{"data":{"repository":{"viewerPermission":"WRITE","defaultBranchRef":{"name":"main"}}}}"#,
+        );
+        assert_eq!(facts.branch, Some(Some("main".into())));
+        assert_eq!(facts.classic, None);
+    }
+
+    /// Answers every call with `answer`, recording the calls.
+    fn gather_with(answer: impl Fn(&[&str]) -> GhOut) -> (Facts, Vec<String>) {
+        let repo = Repo {
+            host: "github.com".into(),
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let mut calls = Vec::new();
+        let mut gh = |args: &[&str]| {
+            calls.push(args.join(" "));
+            answer(args)
+        };
+        let facts = gather(&repo, &mut gh);
+        (facts, calls)
+    }
+
+    #[test]
+    fn a_failed_main_query_keeps_its_partial_answer() {
+        let partial =
+            r#"{"data":{"repository":{"viewerPermission":"WRITE","defaultBranchRef":null}}}"#;
+        let (facts, calls) = gather_with(|_| GhOut::Failed {
+            stdout: partial.into(),
+            why: "rate limited".into(),
+        });
+        assert_eq!(facts.branch, Some(None));
+        assert_eq!(facts.problems, ["rate limited"]);
+        assert_eq!(
+            calls.len(),
+            1,
+            "nothing more is asked without a branch: {calls:?}"
+        );
+        assert_eq!(judge(&facts).verdict, Verdict::NoBranch);
+
+        let (facts, calls) = gather_with(|_| GhOut::NotFound(NOT_FOUND.into()));
+        assert_eq!(facts.problems, ["the repository wasn't found"]);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            judge(&facts).verdict,
+            Verdict::Unknown(
+                "the default branch couldn't be read (the repository wasn't found)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_codeowners_query_that_fails_is_unknown() {
+        let read =
+            |name: &str| std::fs::read_to_string(format!("{FIXTURES}/cli-cli/{name}")).unwrap();
+        let graphql = as_writer("graphql.json", Some(read("graphql.json"))).unwrap();
+        let rules = read("rules.json");
+        let (facts, _) = gather_with(|args| {
+            let all = args.join(" ");
+            if all.contains("requiresSignatures") {
+                GhOut::Failed {
+                    stdout: String::new(),
+                    why: "no such field".into(),
+                }
+            } else if args[0] == "graphql" {
+                GhOut::Ok(graphql.clone())
+            } else if all.contains("/rules/branches/") {
+                GhOut::Ok(rules.clone())
+            } else {
+                GhOut::Failed {
+                    stdout: String::new(),
+                    why: "server error".into(),
+                }
+            }
+        });
+        assert_eq!(facts.codeowners, CodeOwners::Unknown);
+        assert_eq!(facts.classic_signatures, None);
+        let j = judge(&facts);
+        assert_eq!(
+            j.verdict,
+            Verdict::WithoutCodeOwners("CODEOWNERS couldn't be checked".into())
+        );
+    }
+
+    #[test]
+    fn an_admin_view_that_cannot_be_read_or_names_odd_actors() {
+        let facts = facts_on(
+            "github.com",
+            "ocgen-guardrail-e2e",
+            |file, text| match file {
+                "admin.json" => Some("not json".into()),
+                _ => text,
+            },
+        );
+        assert_eq!(facts.admin, None);
+        assert_eq!(facts.viewer_teams, None);
+        assert!(
+            matches!(judge(&facts).verdict, Verdict::Unknown(why) if why.contains("admin view"))
+        );
+
+        // A viewer login that isn't a plain name is never sent to the server.
+        let facts = facts_on(
+            "github.com",
+            "ocgen-guardrail-e2e",
+            |file, text| match file {
+                "admin.json" => text.map(|t| t.replace("\"konstankinollc\"", "\"bad login!\"")),
+                "teams.json" => panic!("the teams query was sent for a bad login"),
+                _ => text,
+            },
+        );
+        assert!(facts.admin.is_some());
+        assert_eq!(facts.viewer_teams, None);
+
+        // Nor is an organization login that isn't one.
+        let team =
+            r#"{"__typename": "Team", "slug": "release", "organization": {"login": "bad org!"}}"#;
+        let facts = facts_on(
+            "github.com",
+            "ocgen-guardrail-e2e",
+            move |file, text| match file {
+                "teams.json" => panic!("the teams query was sent for a bad organization"),
+                _ => with_bypass(team)(file, text),
+            },
+        );
+        assert_eq!(facts.viewer_teams, None);
+        assert!(
+            matches!(judge(&facts).verdict, Verdict::Unknown(why) if why.contains("a team puts you"))
+        );
+    }
+
+    #[test]
+    fn judging_with_facts_missing() {
+        let branch = |b: &str| Some(Some(b.to_string()));
+        let facts = Facts {
+            permission: Some("WRITE".into()),
+            ..Facts::default()
+        };
+        assert_eq!(
+            judge(&facts).verdict,
+            Verdict::Unknown("the default branch couldn't be read".into())
+        );
+        // A rule that blocks, but an unknown permission: it might not bind you.
+        let facts = Facts {
+            branch: branch("main"),
+            classic: Some(Some(Classic {
+                required_reviews: Some(1),
+                ..Classic::default()
+            })),
+            rules: Some(Vec::new()),
+            ..Facts::default()
+        };
+        assert_eq!(
+            judge(&facts).verdict,
+            Verdict::Unknown("your permission on the repository is unknown".into())
+        );
+        // Rulesets that couldn't be read.
+        let facts = Facts {
+            permission: Some("WRITE".into()),
+            branch: branch("main"),
+            classic: Some(None),
+            ..Facts::default()
+        };
+        assert_eq!(
+            judge(&facts).verdict,
+            Verdict::Unknown("rulesets couldn't be read".into())
+        );
+        // A bypass answer mezha doesn't know.
+        let j = verdict("sandbox-runtime", |file, text| {
+            as_writer(file, text).map(|t| t.replace("\"never\"", "\"sometimes\""))
+        });
+        assert!(
+            matches!(&j.verdict, Verdict::Unknown(why) if why.contains("whether you can bypass ruleset \"go/source-security L2 (terraform managed)\" is unknown")),
+            "{j:?}"
+        );
+    }
+
+    #[test]
+    fn an_admins_classic_rule_allowing_force_pushes_warns() {
+        let j = verdict("ocgen-guardrail-e2e", |file, text| match file {
+            "graphql.json" => text.map(|t| {
+                t.replace(
+                    "\"allowsForcePushes\": false",
+                    "\"allowsForcePushes\": true",
+                )
+            }),
+            _ => text,
+        });
+        assert!(matches!(j.verdict, Verdict::WithoutCodeOwners(_)), "{j:?}");
+        assert_eq!(j.warnings, ["the classic rule allows force pushes"]);
+    }
+
+    #[test]
+    fn signature_rules_in_inactive_or_hidden_rulesets() {
+        let rule = |ruleset: u64| Rule {
+            kind: SIGNATURES_RULE.into(),
+            ruleset: Some(ruleset),
+            code_owners: false,
+        };
+        let ruleset = |active: bool| Ruleset {
+            name: "sign".into(),
+            active,
+            bypass: None,
+        };
+        // Inactive: as if absent, and the classic rule (none) settles it.
+        let facts = Facts {
+            classic: Some(None),
+            rules: Some(vec![rule(1)]),
+            rulesets: [(1, ruleset(false))].into(),
+            ..Facts::default()
+        };
+        assert_eq!(signatures(&facts), Some(false));
+        // Hidden: no answer.
+        let facts = Facts {
+            classic: Some(None),
+            rules: Some(vec![rule(2)]),
+            ..Facts::default()
+        };
+        assert_eq!(signatures(&facts), None);
+        // Active: required.
+        let facts = Facts {
+            rules: Some(vec![rule(1)]),
+            rulesets: [(1, ruleset(true))].into(),
+            ..Facts::default()
+        };
+        assert_eq!(signatures(&facts), Some(true));
+    }
+
+    #[test]
+    fn an_admins_rule_that_requires_nothing_or_locks_or_restricts() {
+        let no_pr = (
+            "\"requiresApprovingReviews\": true",
+            "\"requiresApprovingReviews\": false",
+        );
+        let edit = |changes: Vec<(&'static str, &'static str)>| {
+            move |file: &str, text: Option<String>| match file {
+                "admin.json" => {
+                    text.map(|t| changes.iter().fold(t, |t, (from, to)| t.replace(from, to)))
+                }
+                _ => text,
+            }
+        };
+        // Nothing the rule requires: nothing it blocks.
+        let j = verdict("ocgen-guardrail-e2e", edit(vec![no_pr]));
+        assert_eq!(j.verdict, Verdict::Unprotected);
+        // A lock an admin can't lift.
+        let j = verdict(
+            "ocgen-guardrail-e2e",
+            edit(vec![
+                no_pr,
+                ("\"lockBranch\": false", "\"lockBranch\": true"),
+            ]),
+        );
+        assert_eq!(
+            j.verdict,
+            Verdict::WithoutCodeOwners("no rule that binds you requires code-owner review".into())
+        );
+        // Push restrictions that don't name you...
+        let restricts = ("\"restrictsPushes\": false", "\"restrictsPushes\": true");
+        let j = verdict("ocgen-guardrail-e2e", edit(vec![no_pr, restricts]));
+        assert_eq!(
+            j.verdict,
+            Verdict::WithoutCodeOwners("no rule that binds you requires code-owner review".into())
+        );
+        // ...and ones that do.
+        let me = (
+            "\"pushAllowances\": {\n      \"nodes\": []",
+            "\"pushAllowances\": {\n      \"nodes\": [{\"actor\": {\"__typename\": \"User\", \"login\": \"KonstankinoLLC\"}}]",
+        );
+        let j = verdict("ocgen-guardrail-e2e", edit(vec![no_pr, restricts, me]));
+        assert_eq!(
+            j.verdict,
+            Verdict::Bypassable("you are on the classic rule's push list".into())
+        );
+    }
 }

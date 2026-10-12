@@ -913,6 +913,330 @@ mod tests {
         assert!(matches!(read_proxy_answer(""), Proxy::Other(_)));
     }
 
+    fn ctx(root: &Path, home: Option<&Path>, platform: Platform, vars: &[(&str, &str)]) -> Ctx {
+        Ctx {
+            root: root.to_path_buf(),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            home: home.map(Path::to_path_buf),
+            platform,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_policy_probe_reads_mezha_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            policy(root),
+            Policy::Unknown("mezha.toml can't be read".into())
+        );
+        let spec = root.join(SPEC_FILE);
+        fs::write(&spec, "[project]\nname = \"x\"\n").unwrap();
+        assert_eq!(policy(root), Policy::NotApplied);
+        let mut perms = fs::metadata(&spec).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&spec, perms).unwrap();
+        assert_eq!(
+            policy(root),
+            Policy::Unknown("mezha.toml is read-only, so a refused write shows nothing".into())
+        );
+        // A directory can be looked at but not opened for appending.
+        fs::remove_file(&spec).unwrap();
+        fs::create_dir(&spec).unwrap();
+        let odd = policy(root);
+        let Policy::Unknown(why) = &odd else {
+            panic!("{odd:?}");
+        };
+        assert!(
+            why.starts_with("opening mezha.toml for writing failed oddly ("),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn socket_probes_by_platform() {
+        let other = probe_sockets(Platform::Other);
+        assert_eq!(
+            other,
+            Sockets::Unknown("no sandbox on this platform".into())
+        );
+        // Linux asks about a socket that isn't there: a connect gets as
+        // far as the missing path unless the sandbox refuses it first.
+        let linux = probe_sockets(Platform::Linux);
+        assert!(
+            matches!(linux, Sockets::Open | Sockets::Blocked),
+            "{linux:?}"
+        );
+        let mac = probe_sockets(Platform::MacOs);
+        if cfg!(target_os = "macos") {
+            assert!(matches!(mac, Sockets::Open | Sockets::Blocked), "{mac:?}");
+        } else {
+            assert!(matches!(mac, Sockets::Unknown(_)), "{mac:?}");
+        }
+    }
+
+    #[test]
+    fn the_proxy_fingerprint_without_a_proxy_to_ask() {
+        let root = Path::new("/w/repo");
+        let c = |vars: &[(&str, &str)]| ctx(root, None, Platform::Linux, vars);
+        assert_eq!(fingerprint(&c(&[])), Proxy::Missing);
+        assert_eq!(
+            fingerprint(&c(&[("HTTPS_PROXY", "http://")])),
+            Proxy::Missing
+        );
+        // Nothing listens on port 1, on either loopback address.
+        assert_eq!(
+            fingerprint(&c(&[("HTTPS_PROXY", "http://srt:tok@localhost:1")])),
+            Proxy::Unreachable
+        );
+        assert_eq!(
+            fingerprint(&c(&[("https_proxy", "http://127.0.0.1:1")])),
+            Proxy::Unreachable
+        );
+    }
+
+    #[test]
+    fn the_sandbox_verdict_on_other_platforms_and_odd_signals() {
+        for platform in [Platform::Windows, Platform::Wsl1, Platform::Other] {
+            let s = signals(platform, Direct::Refused, Policy::NotApplied);
+            assert!(!s.sandboxed(), "{platform:?}");
+            let c = sandbox_check(&s);
+            assert_eq!(c.status, Status::Fail, "{platform:?}: {}", c.detail);
+            assert!(
+                c.detail.contains("ran outside the sandbox"),
+                "{platform:?}: {}",
+                c.detail
+            );
+        }
+        let mut s = signals(Platform::MacOs, Direct::Refused, Policy::Applied);
+        s.env_says_sandboxed = true;
+        let c = sandbox_check(&s);
+        assert_eq!(c.status, Status::Pass, "{}", c.detail);
+        assert!(
+            c.detail.ends_with("(SANDBOX_RUNTIME is set)"),
+            "{}",
+            c.detail
+        );
+        let s = signals(
+            Platform::MacOs,
+            Direct::Refused,
+            Policy::Unknown("mezha.toml can't be read".into()),
+        );
+        let c = sandbox_check(&s);
+        assert_eq!(c.status, Status::Warn, "{}", c.detail);
+        assert_eq!(
+            c.detail,
+            "can't tell whether the sandbox is in force: mezha.toml can't be read"
+        );
+        assert!(matches!(
+            classify_write(ErrorKind::Other),
+            Policy::Unknown(why) if why.contains("failed oddly")
+        ));
+    }
+
+    #[test]
+    fn looks_tell_devices_and_directories_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(look(Path::new("/dev/null")), Look::CharDevice);
+        assert_eq!(look(tmp.path()), Look::Dir);
+        assert_eq!(
+            look(&tmp.path().join("missing")),
+            Look::Error(ErrorKind::NotFound)
+        );
+        let full = tmp.path().join("full");
+        fs::write(&full, "x").unwrap();
+        assert_eq!(look(&full), Look::File(Ok(1)));
+        let empty = tmp.path().join("empty");
+        fs::write(&empty, "").unwrap();
+        assert_eq!(look(&empty), Look::File(Ok(0)));
+    }
+
+    /// A withheld file shows as unreadable, as a device bound over it, or
+    /// as a directory that can't be listed; a directory where a file was
+    /// expected is simply absent.
+    #[cfg(unix)]
+    #[test]
+    fn credentials_withheld_in_different_ways() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let ssh = home.join(".ssh");
+        fs::create_dir_all(&ssh).unwrap();
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink("/dev/null", home.join(".netrc")).unwrap();
+        fs::create_dir_all(home.join(".config/hub")).unwrap();
+        let locked = home.join(".git-credentials");
+        fs::write(&locked, "https://x:t@h\n").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let c = ctx(tmp.path(), Some(&home), Platform::Linux, &[]);
+
+        let s = signals(Platform::Linux, Direct::NoRoute, Policy::Applied);
+        let check = credentials_check(&c, None, &s);
+        assert_eq!(check.status, Status::Pass, "{}", check.detail);
+        assert_eq!(
+            check.detail,
+            "nothing readable; withheld: ~/.ssh, ~/.git-credentials, ~/.netrc, /dev/null, unix sockets (agents, keyrings, git credential-cache)"
+        );
+
+        let mut s = s;
+        s.sockets = Sockets::Unknown("the probe went oddly".into());
+        let check = credentials_check(&c, None, &s);
+        assert_eq!(check.status, Status::Warn, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .starts_with("can't tell whether unix sockets are blocked: the probe went oddly; "),
+            "{}",
+            check.detail
+        );
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn agent_sockets_follow_the_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let c = ctx(
+            tmp.path(),
+            Some(&home),
+            Platform::Linux,
+            &[("SSH_AUTH_SOCK", "/nonexistent/agent.sock")],
+        );
+        let mut s = signals(Platform::Linux, Direct::NoRoute, Policy::Applied);
+        s.uid = Some(4_242_424);
+        let labels: Vec<String> = agent_sockets(&c, &s).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            [
+                "the ssh agent (SSH_AUTH_SOCK)",
+                "the ssh agent at /run/user/4242424/keyring/ssh",
+                "the ssh agent at /run/user/4242424/gcr/ssh",
+                "the gpg agent at /run/user/4242424/gnupg/S.gpg-agent",
+                "the session bus, where keyrings answer at /run/user/4242424/bus",
+                &format!(
+                    "git credential-cache at {}",
+                    home.join(".cache/git/credential/socket").display()
+                ),
+            ]
+        );
+        // Without a runtime directory or a known uid, only the rest.
+        s.uid = None;
+        let no_home = ctx(tmp.path(), None, Platform::Linux, &[]);
+        assert!(agent_sockets(&no_home, &s).is_empty());
+        // On macOS, launchd's listeners under /private/tmp are tried too.
+        let mac = ctx(tmp.path(), None, Platform::MacOs, &[]);
+        let s = signals(Platform::MacOs, Direct::Refused, Policy::Applied);
+        let launchd: Vec<(String, PathBuf)> = agent_sockets(&mac, &s)
+            .into_iter()
+            .filter(|(_, p)| !p.starts_with("/run/user"))
+            .collect();
+        for (label, path) in &launchd {
+            assert!(
+                path.starts_with("/private/tmp/com.apple.launchd.") && path.ends_with("Listeners"),
+                "{label}: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// With unix sockets open on macOS the fix names the settings, not
+    /// srt's seccomp filter. Whether a real launchd ssh agent answers on
+    /// this machine decides between a warning and a failure.
+    #[test]
+    fn open_sockets_on_macos_name_the_settings_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let c = ctx(tmp.path(), Some(&home), Platform::MacOs, &[]);
+        let mut s = signals(Platform::MacOs, Direct::Refused, Policy::Applied);
+        s.sockets = Sockets::Open;
+        let check = credentials_check(&c, None, &s);
+        assert!(
+            matches!(check.status, Status::Warn | Status::Fail),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("unix sockets can be opened: the settings allow them"),
+            "{}",
+            check.detail
+        );
+        assert_eq!(
+            check.fix.as_deref(),
+            Some("Remove allowAllUnixSockets from your settings, and narrow allowUnixSockets."),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn the_network_check_without_srt_in_front() {
+        let root = Path::new("/w/repo");
+        let layers = Layers::default();
+        let s = signals(Platform::Linux, Direct::NoRoute, Policy::Applied);
+        let c = ctx(root, None, Platform::Linux, &[]);
+        let check = network_check(&c, &layers, None, &s);
+        assert_eq!(check.status, Status::Warn, "{}", check.detail);
+        assert_eq!(
+            check.detail,
+            "direct connections are refused; no HTTPS_PROXY here, so the sandbox's proxy wasn't found"
+        );
+        assert_eq!(check.evidence, [report::INSIDE]);
+
+        let c = ctx(
+            root,
+            None,
+            Platform::Linux,
+            &[("HTTPS_PROXY", "http://srt:tok@localhost:1")],
+        );
+        let check = network_check(&c, &layers, None, &s);
+        assert_eq!(
+            check.detail,
+            "direct connections are refused; the proxy in HTTPS_PROXY doesn't answer"
+        );
+
+        let not_applied = signals(Platform::Linux, Direct::NoRoute, Policy::NotApplied);
+        let check = network_check(&c, &layers, None, &not_applied);
+        assert_eq!(check.status, Status::Warn, "{}", check.detail);
+        assert!(
+            check.detail.ends_with(
+                "; this project's settings aren't in force, so forge hosts weren't contacted"
+            ),
+            "{}",
+            check.detail
+        );
+
+        let outside = signals(Platform::Linux, Direct::Left, Policy::NotApplied);
+        let check = network_check(&c, &layers, None, &outside);
+        assert_eq!(check.status, Status::Skip);
+        assert_eq!(check.detail, "the command ran outside the sandbox");
+    }
+
+    #[test]
+    fn the_notes_mention_the_keychain_on_macos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mac = ctx(tmp.path(), None, Platform::MacOs, &[]);
+        let (checks, notes) = checks(&mac, &Layers::default(), None);
+        let ids: Vec<&str> = checks.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            ["inside-sandbox", "inside-network", "inside-credentials"]
+        );
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[1].contains("macOS keychain"), "{}", notes[1]);
+        let linux = ctx(tmp.path(), None, Platform::Linux, &[]);
+        let (_, notes) = self::checks(&linux, &Layers::default(), None);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
     #[test]
     fn credential_looks() {
         assert_eq!(

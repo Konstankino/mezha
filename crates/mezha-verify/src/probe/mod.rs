@@ -697,4 +697,87 @@ mod tests {
         assert!(!valid_var("A-B"));
         assert!(!valid_var("$(id)"));
     }
+
+    fn ctx(home: Option<&Path>, vars: &[(&str, &str)]) -> Ctx {
+        Ctx {
+            root: PathBuf::from("/w/repo"),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            home: home.map(Path::to_path_buf),
+            platform: crate::ctx::Platform::detect(),
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn credential_paths_follow_the_environment_and_git() {
+        let c = ctx(None, &[("XDG_CONFIG_HOME", "/x")]);
+        let git = GitConfig::parse(
+            "global\0file:/h/.gitconfig\0credential.helper\nstore --file=/s/creds\0global\0file:/h/.gitconfig\0credential.helper\nstore --file ~/creds\0global\0file:/h/.gitconfig\0credential.helper\ncache\0",
+        );
+        let paths: Vec<String> = credential_paths(&c, Some(&git))
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        // Without a home, only the XDG places and the helper's absolute file.
+        assert_eq!(
+            paths,
+            [
+                "/x/gh/hosts.yml",
+                "/x/git/credentials",
+                "/x/hub",
+                "/x/glab-cli/config.yml",
+                "/s/creds",
+            ]
+        );
+        assert!(credential_paths(&ctx(None, &[]), None).is_empty());
+        assert_eq!(label(&c, Path::new("/s/creds")), "/s/creds");
+        let at_home = ctx(Some(Path::new("/h")), &[]);
+        assert_eq!(label(&at_home, Path::new("/h/.netrc")), "~/.netrc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_here_needs_git_and_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = Target {
+            scheme: crate::hosts::Scheme::Https,
+            endpoint: crate::hosts::Endpoint {
+                host: "github.com".into(),
+                port: 443,
+            },
+            url: "https://github.com/o/r.git".into(),
+        };
+        // No git on PATH: every target is inconclusive, and says why.
+        let no_git = ctx(None, &[("PATH", tmp.path().to_str().unwrap())]);
+        let results = network_here(&no_git, std::slice::from_ref(&target), None);
+        assert_eq!(
+            results,
+            [NetResult {
+                target: target.clone(),
+                outcome: Outcome::Inconclusive("git isn't on PATH".into()),
+            }]
+        );
+        let with_git = ctx(
+            None,
+            &[
+                ("PATH", "/usr/bin:/bin"),
+                ("https_proxy", "http://127.0.0.1:1"),
+                ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ],
+        );
+        assert!(network_here(&with_git, &[], None).is_empty());
+        // A proxy nobody answers on: the probe runs and can't conclude.
+        let results = network_here(&with_git, &[target], None);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(
+            results[0].outcome,
+            Outcome::Inconclusive("the connection failed".into()),
+            "{results:?}"
+        );
+    }
 }

@@ -167,6 +167,36 @@ mod tests {
     }
 
     #[test]
+    fn zone_offsets_and_month_lengths() {
+        assert_eq!(parse_iso("2027-01-15T11:00:00+03"), Some(1_800_000_000));
+        assert_eq!(parse_iso("2027-01-15T05:00:00-03"), Some(1_800_000_000));
+        for bad in [
+            "2027-01-15T08:00:00+25:00",
+            "2027-01-15T08:00:00+03:60",
+            "2027-01-15T08:00:00+0x30",
+            "2026-04-31",
+            "2026-06-31",
+            "2026-09-31",
+            "2026-11-31",
+        ] {
+            assert_eq!(parse_iso(bad), None, "{bad}");
+        }
+        for (date, want) in [
+            ("2026-04-30", "2026-04-30T00:00:00Z"),
+            ("2026-06-30", "2026-06-30T00:00:00Z"),
+            ("2026-12-31", "2026-12-31T00:00:00Z"),
+            ("2100-02-28", "2100-02-28T00:00:00Z"),
+        ] {
+            assert_eq!(
+                parse_iso(date).map(format_iso).as_deref(),
+                Some(want),
+                "{date}"
+            );
+        }
+        assert_eq!(parse_iso("2100-02-29"), None);
+    }
+
+    #[test]
     fn round_trip() {
         for secs in [0, 951_782_400, 1_800_000_000, 4_102_444_799, -86_400] {
             assert_eq!(parse_iso(&format_iso(secs)), Some(secs), "{secs}");

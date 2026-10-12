@@ -75,3 +75,33 @@ pub fn check(inventory: &Inventory, spec: &mezha_spec::Spec) -> Check {
     );
     f.into_check(check, &ok)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::check;
+    use crate::inventory::{Inventory, MAX_FILES};
+    use crate::report::Status;
+
+    #[test]
+    fn a_walk_that_stopped_early_warns() {
+        let spec = mezha_spec::parse("[project]\nname = \"x\"\n").unwrap();
+        let truncated = Inventory {
+            truncated: true,
+            ..Inventory::default()
+        };
+        let c = check(&truncated, &spec);
+        assert_eq!(c.status, Status::Warn, "{}", c.detail);
+        assert_eq!(
+            c.detail,
+            format!("stopped after {MAX_FILES} files or 8 directories deep: incomplete")
+        );
+        let clean = check(&Inventory::default(), &spec);
+        assert_eq!(
+            (clean.status, clean.detail.as_str()),
+            (
+                Status::Pass,
+                "0 file(s) scanned: no hidden text, secrets, raw HTML or shell run at load"
+            )
+        );
+    }
+}

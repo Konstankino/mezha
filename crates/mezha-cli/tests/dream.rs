@@ -35,9 +35,31 @@ rule_of_two = ["private_data"]
 memory = { class = "phi" }
 "#;
 
+/// A second project role, a role whose memory lives in your user config,
+/// and one without memory.
+const MORE_ROLES: &str = r#"
+[agent.reviewer]
+description = "Reviews changes."
+tools = ["Read"]
+rule_of_two = ["private_data"]
+memory = { scope = "project" }
+
+[agent.scribe]
+description = "Keeps notes across projects."
+tools = ["Read"]
+rule_of_two = ["private_data"]
+memory = { scope = "user" }
+
+[agent.plain]
+description = "Remembers nothing."
+tools = ["Read"]
+rule_of_two = ["private_data"]
+"#;
+
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
-# A stand-in for claude: checks how mezha dream runs it, then acts per $FAKE_MODE.
-if [ "$1" = "--version" ]; then echo "2.1.285 (Claude Code)"; exit 0; fi
+# A stand-in for claude: checks how mezha dream runs it, then acts per $FAKE_MODE,
+# or per $FAKE_ROLE_MODE (`<role>=<mode>`) for that one role.
+if [ "$1" = "--version" ]; then echo "${FAKE_VERSION:-2.1.285 (Claude Code)}"; exit 0; fi
 staged=""; restricted=""; mode=""; tools=""; allow=""; prompts=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,14 +80,25 @@ done
 [ -z "$CLAUDECODE" ] || { echo "CLAUDECODE leaked" >&2; exit 9; }
 [ -z "$GH_TOKEN" ] || { echo "GH_TOKEN leaked" >&2; exit 9; }
 [ "$CLAUDE_CODE_DISABLE_CLAUDE_MDS" = 1 ] && [ "$CLAUDE_CODE_DISABLE_AUTO_MEMORY" = 1 ] || { echo "CLAUDE.md or auto memory on" >&2; exit 9; }
-cat > "$staged/../../task-$(basename "$staged").txt"
+role=$(basename "$staged")
+mode="$FAKE_MODE"
+case "$FAKE_ROLE_MODE" in "$role="*) mode="${FAKE_ROLE_MODE#*=}" ;; esac
+cat > "$staged/../../task-$role.txt"
+env > "$staged/../../env-$role.txt"
+[ "$mode" = noinit ] && exit 0
 tools_json='["Edit","Glob","Grep","Read","Write"]'
-[ "$FAKE_MODE" = badinit ] && tools_json='["Bash","Edit","Glob","Grep","Read","Write"]'
-printf '{"type":"system","subtype":"init","tools":%s,"mcp_servers":[],"permissionMode":"dontAsk","model":"claude-test","apiKeySource":"none","plugins":[]}\n' "$tools_json"
-[ "$FAKE_MODE" = badinit ] && { sleep 30; exit 0; }
+[ "$mode" = badinit ] && tools_json='["Bash","Edit","Glob","Grep","Read","Write"]'
+plugins='[]'
+[ "$mode" = plugins ] && plugins='[{"name":"tidy","source":"tidy@shop"},{"name":"core","source":"core@builtin"}]'
+printf '{"type":"system","subtype":"init","tools":%s,"mcp_servers":[],"permissionMode":"dontAsk","model":"claude-test","apiKeySource":"none","plugins":%s}\n' "$tools_json" "$plugins"
+[ "$mode" = badinit ] && { sleep 30; exit 0; }
 summary="Added a lesson."
-case "$FAKE_MODE" in
+denials='[]'
+case "$mode" in
   write) printf '# Memory\n\n- Run cargo test -p x before reporting (seen 2 times).\n' > "$staged/MEMORY.md" ;;
+  plugins) printf '# Memory\n\n- a lesson\n' > "$staged/MEMORY.md"; denials='[{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}]' ;;
+  empty) : > "$staged/MEMORY.md" ;;
+  long) i=0; while [ $i -lt 201 ]; do echo "- line $i"; i=$((i+1)); done > "$staged/MEMORY.md" ;;
   outside) echo stray > stray.md ;;
   hard) printf '# Memory\n\n- hidden\342\200\213word\n' > "$staged/MEMORY.md" ;;
   phrase) printf '# Memory\n\n- Avoid git commit --no-verify: hooks catch fmt.\n' > "$staged/MEMORY.md" ;;
@@ -76,8 +109,10 @@ case "$FAKE_MODE" in
   nochange) summary="no changes" ;;
   budget) printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":1.0}\n'; exit 1 ;;
 esac
-printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}\n'
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.12,"result":"%s","permission_denials":[]}\n' "$summary"
+# Ten messages and an event of another kind, as a real session streams them.
+i=0; while [ $i -lt 10 ]; do printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}\n'; i=$((i+1)); done
+printf '{"type":"user","message":{"content":[]}}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.12,"result":"%s","permission_denials":%s}\n' "$summary" "$denials"
 "#;
 
 struct Setup {
@@ -118,12 +153,23 @@ fn transcript(p: &Project, role: &str, id: &str) {
 
 /// The same, `sooner` seconds later.
 fn transcript_ago(p: &Project, role: &str, id: &str, sooner: u64) {
+    transcript_in(p, &p.root, role, id, sooner);
+}
+
+/// A session that ran in `root` (the project or a worktree of it).
+fn transcript_in(p: &Project, root: &Path, role: &str, id: &str, sooner: u64) {
+    transcript_padded(p, root, role, id, sooner, "");
+}
+
+/// The same, with `pad` added to the task and the final message, for runs
+/// whose digests are big.
+fn transcript_padded(p: &Project, root: &Path, role: &str, id: &str, sooner: u64, pad: &str) {
     let ts = |ago: u64| format_iso((now() - ago + sooner) as i64);
     let dir = p
         .home
         .join(".claude/projects")
-        .join(project_dir_name(&p.root.to_string_lossy()));
-    let cwd = p.root.to_string_lossy().into_owned();
+        .join(project_dir_name(&root.to_string_lossy()));
+    let cwd = root.to_string_lossy().into_owned();
     let session = format!("s-{id}");
     let mut parent = String::new();
     parent.push_str(&line(serde_json::json!({"type": "user", "uuid": format!("{id}-p1"), "timestamp": ts(3700), "cwd": cwd, "sessionId": session, "origin": {"kind": "human"}, "message": {"role": "user", "content": "Please do the thing"}})));
@@ -131,8 +177,8 @@ fn transcript_ago(p: &Project, role: &str, id: &str, sooner: u64) {
     parent.push_str(&line(serde_json::json!({"type": "user", "uuid": format!("{id}-p3"), "timestamp": ts(3400), "cwd": cwd, "sessionId": session, "origin": {"kind": "human"}, "message": {"role": "user", "content": "Next time run the tests first."}})));
     write(&dir.join(format!("{session}.jsonl")), &parent);
     let mut agent = String::new();
-    agent.push_str(&line(serde_json::json!({"type": "user", "uuid": format!("{id}-a1"), "timestamp": ts(3650), "cwd": cwd, "sessionId": session, "isSidechain": true, "agentId": id, "message": {"role": "user", "content": "Do the thing in crates/x"}})));
-    agent.push_str(&line(serde_json::json!({"type": "assistant", "uuid": format!("{id}-a2"), "timestamp": ts(3550), "cwd": cwd, "sessionId": session, "isSidechain": true, "agentId": id, "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "Done.\n\n## Lessons\n\n- Tests first.\n- Token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"}]}})));
+    agent.push_str(&line(serde_json::json!({"type": "user", "uuid": format!("{id}-a1"), "timestamp": ts(3650), "cwd": cwd, "sessionId": session, "isSidechain": true, "agentId": id, "message": {"role": "user", "content": format!("Do the thing in crates/x{pad}")}})));
+    agent.push_str(&line(serde_json::json!({"type": "assistant", "uuid": format!("{id}-a2"), "timestamp": ts(3550), "cwd": cwd, "sessionId": session, "isSidechain": true, "agentId": id, "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": format!("Done.{pad}\n\n## Lessons\n\n- Tests first.\n- Token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB")}]}})));
     let sub = dir.join(&session).join("subagents");
     write(&sub.join(format!("agent-{id}.jsonl")), &agent);
     write(
@@ -142,13 +188,19 @@ fn transcript_ago(p: &Project, role: &str, id: &str, sooner: u64) {
 }
 
 fn setup() -> Setup {
+    setup_spec(SPEC)
+}
+
+/// A committed project with `spec`, with implementer's memory in git and a
+/// run of implementer in the transcripts.
+fn setup_spec(spec: &str) -> Setup {
     let p = Project::new();
     write(
         &p.home.join(".gitconfig"),
         "[user]\n\tname = Test\n\temail = test@example.com\n",
     );
     git_ok(&p.root, &p.home, &["init", "-q", "-b", "main"]);
-    p.write_spec(SPEC);
+    p.write_spec(spec);
     write(
         &p.root.join("mezha/agents/implementer.md"),
         "You implement changes.\n",
@@ -300,6 +352,7 @@ fn refusals_keep_the_workspace() {
         ("changelog", "CHANGELOG.md: the dreamer changed it"),
         ("budget", "it reached its budget"),
         ("noresult", "claude ended without a result"),
+        ("noinit", "claude didn't report how it started"),
         ("badinit", "the dreamer got the tools"),
     ] {
         let s = setup();
@@ -626,4 +679,812 @@ fn metrics_record_and_report() {
 
     let inside = s.cmd(&["metrics", "--record"], "write", &[("CLAUDECODE", "1")]);
     assert_eq!(inside.status.code(), Some(1));
+}
+
+#[test]
+fn the_base_can_be_named_and_must_be_a_commit() {
+    let s = setup();
+    let out = s.dream("write", &["--dry-run", "--base", "main"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("in a worktree of main:"), "{o}");
+
+    let out = s.dream("write", &["--dry-run", "--base=-x"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--base `-x` is not a revision"),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.dream("write", &["--dry-run", "--base", "nowhere"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--base nowhere is not a commit"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.branches().is_empty());
+}
+
+#[test]
+fn origin_head_is_the_default_base() {
+    let s = setup();
+    let head = git_ok(&s.p.root, &s.p.home, &["rev-parse", "HEAD"]);
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["update-ref", "refs/remotes/origin/main", head.trim()],
+    );
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    let out = s.dream("write", &["--role", "implementer"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(o.contains("(from origin/main)"), "{o}");
+    assert!(
+        o.contains("gh pr create --base main --head mezha/dream-"),
+        "{o}"
+    );
+    assert!(!e.contains("no origin/HEAD"), "{e}");
+}
+
+#[test]
+fn a_branch_name_already_taken_gets_a_suffix() {
+    let s = setup();
+    let start = now();
+    for t in start..start + 5 {
+        git_ok(
+            &s.p.root,
+            &s.p.home,
+            &[
+                "branch",
+                &format!("mezha/dream-{}", mezha_render::utc_stamp(t)),
+            ],
+        );
+    }
+    let out = s.dream("write", &["--role", "implementer"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    let created: Vec<String> = s
+        .branches()
+        .into_iter()
+        .filter(|b| b.ends_with("-2"))
+        .collect();
+    assert_eq!(created.len(), 1, "{:?}", s.branches());
+    assert!(o.contains(&format!("on {} (from main)", created[0])), "{o}");
+}
+
+#[test]
+fn notes_say_what_the_dream_does_not_see() {
+    let s = setup();
+    // Old finished dreams beyond the newest few are pruned.
+    for n in 1..=6 {
+        fs::create_dir_all(s.dreams().join(format!("2020010{n}T000000Z"))).unwrap();
+    }
+    // A refused dream leaves its worktree, which the next dream points out.
+    let out = s.dream("outside", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let refused = s.workspaces().pop().unwrap();
+    // Memory edited here but not committed, and another worktree whose
+    // sessions count as this project's.
+    fs::write(
+        s.p.root.join(".claude/agent-memory/implementer/MEMORY.md"),
+        "# Memory\n\n- edited here, not committed\n",
+    )
+    .unwrap();
+    let feature = s.p.base.join("feature");
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["worktree", "add", "-q", feature.to_str().unwrap()],
+    );
+    transcript_in(&s.p, &feature, "implementer", "f1", 300);
+    let config = s.p.home.join(".claude");
+    let out = s.dream_env(
+        "write",
+        &["--role", "implementer"],
+        &[
+            ("CLAUDE_CONFIG_DIR", config.to_str().unwrap()),
+            (
+                "CLAUDE_CODE_PROJECT_DIR_NAME",
+                &project_dir_name(&s.p.root.to_string_lossy()),
+            ),
+        ],
+    );
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(
+        e.contains(&format!(
+            "note: refused dreams still have worktrees: {}",
+            refused.join("wt").display()
+        )),
+        "{e}"
+    );
+    assert!(
+        e.contains("note: .claude/agent-memory has uncommitted changes here; the dream starts from main without them"),
+        "{e}"
+    );
+    assert!(o.contains("Read 2 session(s)"), "{o}");
+    assert!(o.contains("implementer    project  2 run(s)"), "{o}");
+    assert!(!s.dreams().join("20200101T000000Z").exists(), "not pruned");
+    assert!(
+        s.dreams().join("20200102T000000Z").is_dir(),
+        "pruned too much"
+    );
+    assert!(
+        refused.join("wt").is_dir(),
+        "a refused dream is never pruned"
+    );
+}
+
+#[test]
+fn tracked_local_memory_is_refused() {
+    let s = setup();
+    write(
+        &s.p.root
+            .join(".claude/agent-memory-local/clinician/MEMORY.md"),
+        "# Local\n",
+    );
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["add", "-f", ".claude/agent-memory-local"],
+    );
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["commit", "-q", "--no-verify", "-m", "oops"],
+    );
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("main tracks .claude/agent-memory-local/, which is local memory"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.branches().is_empty());
+}
+
+#[test]
+fn roles_are_checked_before_anything_runs() {
+    let s = setup_spec(&format!("{SPEC}{MORE_ROLES}"));
+    let out = s.dream("write", &["--role", "nobody"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("there is no agent.nobody in mezha.toml"),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.dream("write", &["--role", "plain"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("agent.plain has no memory"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.dreams().exists(), "nothing was set up");
+
+    let s = setup_spec(
+        "[project]\nname = \"dreamtest\"\n\n[policy]\npermissions_ask = [\"git push\"]\n\n[agent.plain]\ndescription = \"Remembers nothing.\"\ntools = [\"Read\"]\nrule_of_two = [\"private_data\"]\n",
+    );
+    let out = s.dream("write", &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("no agent in mezha.toml has memory"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn project_memory_must_be_flat_files() {
+    let s = setup();
+    write(
+        &s.p.root
+            .join(".claude/agent-memory/implementer/notes/deep.md"),
+        "deep\n",
+    );
+    git_ok(&s.p.root, &s.p.home, &["add", "-A"]);
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["commit", "-q", "--no-verify", "-m", "nested"],
+    );
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(".claude/agent-memory/implementer/notes/deep.md at ")
+            && stderr(&out).contains("isn't a plain file directly in the memory directory"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.branches().is_empty());
+}
+
+#[test]
+fn refuses_local_memory_behind_a_symlink() {
+    let s = setup();
+    transcript(&s.p, "clinician", "c1");
+    let elsewhere = s.p.base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, s.p.root.join(".claude/agent-memory-local")).unwrap();
+    let out = s.dream("write", &["--role", "clinician"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out)
+            .contains("agent-memory-local is a symlink, so local memory can't be dreamed safely"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        fs::read_dir(&elsewhere).unwrap().next().is_none(),
+        "something was written"
+    );
+}
+
+#[test]
+fn user_memory_is_dreamed_from_your_config_but_never_through_a_symlink() {
+    let s = setup_spec(&format!("{SPEC}{MORE_ROLES}"));
+    transcript(&s.p, "scribe", "u1");
+    let out = s.dream("write", &["--role", "scribe"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("scribe         user     1 run(s)"), "{o}");
+    let user_dir = s.p.home.join(".claude/agent-memory/scribe");
+    assert!(
+        o.contains(&format!(
+            "The dreamer's changes to the memory of scribe in {}:",
+            user_dir.display()
+        )),
+        "{o}"
+    );
+    assert!(o.contains("Not applied."), "{o}");
+    assert!(!user_dir.exists(), "applied without asking");
+    assert!(s.branches().is_empty());
+
+    fs::create_dir_all(user_dir.parent().unwrap()).unwrap();
+    let elsewhere = s.p.base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &user_dir).unwrap();
+    let out = s.dream("write", &["--role", "scribe"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("scribe is a symlink, so user memory can't be dreamed safely"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn claude_must_be_a_recent_version_that_runs() {
+    let s = setup();
+    let out = s.dream_env(
+        "write",
+        &["--role", "implementer"],
+        &[("FAKE_VERSION", "banana")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("`claude --version` said \"banana\", not a version"),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.dream_env(
+        "write",
+        &["--role", "implementer"],
+        &[("FAKE_VERSION", "1.0.0 (Claude Code)")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Claude Code 1.0.0 (Claude Code) is older than"),
+        "{}",
+        stderr(&out)
+    );
+    // One that can't start at all.
+    write(&s.bin.join("claude"), "#!/nonexistent/interpreter\n");
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("error:") && stderr(&out).contains("os error"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.branches().is_empty(), "{:?}", s.branches());
+}
+
+#[test]
+fn a_refusal_after_a_commit_names_the_roles_already_on_the_branch() {
+    let s = setup_spec(&format!("{SPEC}{MORE_ROLES}"));
+    transcript(&s.p, "reviewer", "r1");
+    let out = s.dream_env("write", &[], &[("FAKE_ROLE_MODE", "reviewer=outside")]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "{o}\n{e}");
+    assert!(o.contains("committed 2 file(s)"), "{o}");
+    assert!(e.contains("The dream of reviewer was refused:"), "{e}");
+    assert!(
+        e.contains("Roles committed before it are on mezha/dream-")
+            && e.contains(": implementer\n"),
+        "{e}"
+    );
+    let last = s.last_run();
+    assert_eq!(last["roles"], serde_json::json!(["implementer"]), "{last}");
+    assert_eq!(last["cost_usd"], 0.24, "both sessions cost: {last}");
+    assert!(
+        last["error"].as_str().unwrap().starts_with("reviewer: "),
+        "{last}"
+    );
+    let branch = &s.branches()[0];
+    let ahead = git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["rev-list", "--count", &format!("main..{branch}")],
+    );
+    assert_eq!(ahead.trim(), "1", "only implementer was committed");
+}
+
+#[test]
+fn the_dreamer_s_progress_plugins_and_denials_are_shown() {
+    let s = setup();
+    let out = s.dream("plugins", &["--role", "implementer"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("  … 10 messages"), "{o}");
+    assert!(
+        o.contains("done: 4 turns, $0.12; plugins loaded: tidy\n"),
+        "builtin plugins aren't listed: {o}"
+    );
+    assert!(
+        o.contains("refused by Claude Code: Bash {\"command\":\"rm -rf /\"}"),
+        "{o}"
+    );
+}
+
+#[test]
+fn an_emptied_file_is_removed_and_a_long_index_is_a_warning() {
+    let s = setup();
+    let out = s.dream("empty", &["--role", "implementer"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("  remove MEMORY.md"), "{o}");
+    let branch = &s.branches()[0];
+    let listed = git_ok(
+        &s.p.root,
+        &s.p.home,
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            branch,
+            ".claude/agent-memory/implementer/",
+        ],
+    );
+    assert_eq!(
+        listed.trim(),
+        ".claude/agent-memory/implementer/CHANGELOG.md",
+        "{listed}"
+    );
+
+    let s = setup();
+    let out = s.dream("long", &["--role", "implementer"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(e.contains("warning: MEMORY.md has 201 lines and"), "{e}");
+    assert_eq!(s.branches().len(), 1, "a warning doesn't refuse");
+}
+
+#[test]
+fn an_unwritable_metrics_store_is_a_note_not_a_refusal() {
+    let s = setup();
+    let store = mezha_memory::metrics_dir(&s.p.home, &s.p.root);
+    // A directory where the store's files should be: nothing can be written.
+    fs::create_dir_all(store.join("sessions.jsonl")).unwrap();
+    fs::create_dir_all(store.join("dreams.jsonl")).unwrap();
+    let out = s.dream("write", &["--role", "implementer"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(e.contains("note: couldn't record metrics:"), "{e}");
+    assert!(
+        e.contains("note: couldn't record the dream in the metrics store:"),
+        "{e}"
+    );
+    assert_eq!(s.branches().len(), 1, "{:?}", s.branches());
+}
+
+#[test]
+fn an_unwritable_dreams_directory_is_an_error() {
+    let s = setup();
+    fs::create_dir_all(s.dreams()).unwrap();
+    fs::set_permissions(s.dreams(), fs::Permissions::from_mode(0o500)).unwrap();
+    let out = s.dream("write", &["--role", "implementer"]);
+    fs::set_permissions(s.dreams(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(&format!(
+            "can't lock {}",
+            s.dreams().join("dream.lock").display()
+        )),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.branches().is_empty());
+}
+
+#[test]
+fn user_settings_reach_the_dreamer_except_what_needs_you() {
+    let s = setup();
+    write(
+        &s.p.home.join(".claude/settings.json"),
+        r#"{"env": {"ANTHROPIC_BASE_URL": "http://proxy.localhost:1", "EDITOR": "vi"}, "awsAuthRefresh": "aws sso login"}"#,
+    );
+    let out = s.dream("write", &["--scheduled"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("Not using awsAuthRefresh unattended"), "{o}");
+    assert!(
+        o.contains("From your user settings: ANTHROPIC_BASE_URL\n"),
+        "{o}"
+    );
+    let ws = s.workspaces().pop().unwrap();
+    let settings = fs::read_to_string(ws.join("settings-implementer.json")).unwrap();
+    assert!(!settings.contains("awsAuthRefresh"), "{settings}");
+    let env = fs::read_to_string(ws.join("env-implementer.txt")).unwrap();
+    assert!(
+        env.contains("ANTHROPIC_BASE_URL=http://proxy.localhost:1\n"),
+        "{env}"
+    );
+    assert!(!env.contains("EDITOR="), "{env}");
+
+    // At a terminal, the refresh command is forwarded as it is.
+    let s = setup();
+    write(
+        &s.p.home.join(".claude/settings.json"),
+        r#"{"awsAuthRefresh": "aws sso login"}"#,
+    );
+    let out = s.dream("write", &["--role", "implementer"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(
+        o.contains("From your user settings: awsAuthRefresh\n"),
+        "{o}"
+    );
+}
+
+#[test]
+fn the_newest_dream_of_a_role_decides_whether_it_is_pending() {
+    let s = setup();
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let first = s.branches()[0].clone();
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-verify",
+            "-m",
+            "Merge",
+            &first,
+        ],
+    );
+    // A second dream, a second later so the store keeps both.
+    transcript_ago(&s.p, "implementer", "a2", 600);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let out = s.dream("phrase", &["--role", "implementer"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(s.branches().len(), 2, "{:?}", s.branches());
+    let rows =
+        fs::read_to_string(mezha_memory::metrics_dir(&s.p.home, &s.p.root).join("dreams.jsonl"))
+            .unwrap();
+    assert_eq!(rows.lines().count(), 2, "{rows}");
+
+    // The newest is still on its branch, so a scheduled run skips the role.
+    transcript_ago(&s.p, "implementer", "a3", 1200);
+    let out = s.dream("write", &["--scheduled"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(
+        o.contains("Skipping implementer: its last dream on mezha/dream-"),
+        "{o}"
+    );
+    assert_eq!(s.branches().len(), 2, "{:?}", s.branches());
+}
+
+#[test]
+fn metrics_count_sessions_in_worktrees_but_not_in_ab_runs() {
+    let s = setup();
+    let feature = s.p.base.join("feature");
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["worktree", "add", "-q", feature.to_str().unwrap()],
+    );
+    transcript_in(&s.p, &feature, "implementer", "f1", 100);
+    // An A/B worktree under the temp dir runs no sessions of yours.
+    let ab = s.p.tmp.join("mezha-ab-x1y2").join("run-abc");
+    fs::create_dir_all(ab.parent().unwrap()).unwrap();
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["worktree", "add", "-q", ab.to_str().unwrap()],
+    );
+    transcript_in(&s.p, &ab, "implementer", "x1", 200);
+    let report = s.cmd(&["metrics", "--json"], "write", &[]);
+    assert!(report.status.success(), "{}", stderr(&report));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["sessions"], 2, "{json}");
+
+    // Without a trusted git, only the project itself is read.
+    let report = s.p.mezha_env(&["metrics", "--json"], &[("PATH", "/bin")]);
+    assert!(report.status.success(), "{}", stderr(&report));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["sessions"], 1, "{json}");
+}
+
+#[test]
+fn recorded_dreams_are_listed_as_they_are_when_they_cannot_be_judged() {
+    let row = |scope: &str, at: u64| {
+        serde_json::json!({
+            "v": 1, "key": format!("20260101T000000Z/{scope}"), "stamp": "20260101T000000Z",
+            "role": "implementer", "scope": scope, "at": at, "runs": 1, "turns": 2,
+            "cost_usd": 0.1, "commit": null, "dir": null, "patch_id": null,
+            "branch": null, "applied": scope != "project", "outcome": null
+        })
+        .to_string()
+    };
+    // Local memory has no branch to watch; a project dream without a
+    // recorded directory can't be matched with the base's commits.
+    let s = setup();
+    let store = mezha_memory::metrics_dir(&s.p.home, &s.p.root);
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        store.join("dreams.jsonl"),
+        format!(
+            "{}\n{}\n",
+            row("local", now() - 100),
+            row("project", now() - 50)
+        ),
+    )
+    .unwrap();
+    let report = s.cmd(&["metrics", "--json"], "write", &[]);
+    assert!(report.status.success(), "{}", stderr(&report));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["dreams"]["with_edits"], 0, "{json}");
+    assert_eq!(json["dreams"]["without_edits"], 0, "{json}");
+    let human = stdout(&s.cmd(&["metrics"], "write", &[]));
+    assert!(human.contains("Dreams"), "{human}");
+
+    // A repository without commits has no base to judge against.
+    let p = Project::new();
+    git_ok(&p.root, &p.home, &["init", "-q", "-b", "main"]);
+    p.write_spec(SPEC);
+    let store = mezha_memory::metrics_dir(&p.home, &p.root);
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("dreams.jsonl"), row("project", now() - 50)).unwrap();
+    let report = p.mezha(&["metrics", "--json"]);
+    assert!(report.status.success(), "{}", stderr(&report));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["dreams"]["with_edits"], 0, "{json}");
+    assert_eq!(json["dreams"]["without_edits"], 0, "{json}");
+}
+
+#[test]
+fn a_changelog_only_commit_in_the_base_is_not_a_memory_change() {
+    let s = setup();
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let branch = s.branches()[0].clone();
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-verify",
+            "-m",
+            "Merge",
+            &branch,
+        ],
+    );
+    write(
+        &s.p.root
+            .join(".claude/agent-memory/implementer/CHANGELOG.md"),
+        "# Changelog\n\n- rewritten by hand\n",
+    );
+    git_ok(&s.p.root, &s.p.home, &["add", "-A"]);
+    git_ok(
+        &s.p.root,
+        &s.p.home,
+        &["commit", "-q", "--no-verify", "-m", "tidy the changelog"],
+    );
+    let report = s.cmd(&["metrics", "--json"], "write", &[]);
+    assert!(report.status.success(), "{}", stderr(&report));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+    assert_eq!(json["dreams"]["without_edits"], 1, "{json}");
+    assert_eq!(json["dreams"]["with_edits"], 0, "{json}");
+}
+
+#[test]
+fn schedules_need_a_trusted_mezha_and_warn_about_shell_only_keys() {
+    let s = setup();
+    s.nightly();
+    // No mezha on PATH where agents can't write: nothing to schedule. One
+    // under TMPDIR is as good as none, and the note says so.
+    let distrusted = s.p.tmp.join("bin");
+    write(&distrusted.join("mezha"), "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(distrusted.join("mezha"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", distrusted.display(), s.bin.display());
+    let out = s.p.mezha_env(
+        &["dream", "--schedule", "launchd"],
+        &[("PATH", path.as_str()), ("FAKE_MODE", "write")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let e = stderr(&out);
+    assert!(
+        e.contains("no mezha on PATH outside directories agents can write (ignored `mezha` at"),
+        "{e}"
+    );
+    assert!(
+        e.contains("cargo install --locked --force --path crates/mezha-cli"),
+        "{e}"
+    );
+
+    // Another mezha first on PATH: the note says which one the schedule runs.
+    write(&s.bin.join("mezha"), "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(s.bin.join("mezha"), fs::Permissions::from_mode(0o755)).unwrap();
+    s.p.write_spec(&format!(
+        "{SPEC}\n[memory]\ndream_schedule = \"cron\"\ndream_cron = \"15 3 * * *\"\n"
+    ));
+    let config = s.p.home.join(".claude");
+    let out = s.cmd(
+        &["dream", "--schedule", "cron"],
+        "write",
+        &[
+            ("CLAUDE_CONFIG_DIR", config.to_str().unwrap()),
+            ("ANTHROPIC_API_KEY", "sk-ant-test"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ],
+    );
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(
+        e.contains(&format!(
+            "note: the schedule runs {}, not the mezha you ran now",
+            s.bin.join("mezha").display()
+        )),
+        "{e}"
+    );
+    assert!(
+        e.contains("warning: set only in your shell, not in ~/.claude/settings.json: ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK."),
+        "{e}"
+    );
+    assert!(o.contains("15 3 * * * env PATH="), "{o}");
+    assert!(
+        o.contains(&format!("CLAUDE_CONFIG_DIR={}", config.display())),
+        "{o}"
+    );
+    assert!(!o.contains("sk-ant-test"), "a key in the snippet: {o}");
+}
+
+#[test]
+fn a_git_where_agents_could_put_one_is_skipped_with_a_note() {
+    let s = setup();
+    let distrusted = s.p.tmp.join("bin");
+    write(&distrusted.join("git"), "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(distrusted.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", distrusted.display(), s.bin.display());
+    let out = s.p.mezha_env(
+        &["dream", "--dry-run", "--role", "implementer"],
+        &[("PATH", path.as_str()), ("FAKE_MODE", "write")],
+    );
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(
+        e.contains(&format!(
+            "note: ignored `git` at {} (",
+            distrusted.join("git").display()
+        )),
+        "{e}"
+    );
+    assert!(o.contains("Dry run: no dreamer ran"), "{o}");
+}
+
+#[test]
+fn too_many_branches_of_one_name_is_an_error() {
+    let s = setup();
+    let head = git_ok(&s.p.root, &s.p.home, &["rev-parse", "HEAD"]);
+    let start = now();
+    let mut refs = String::new();
+    for t in start..start + 5 {
+        let stamp = mezha_render::utc_stamp(t);
+        refs.push_str(&format!(
+            "create refs/heads/mezha/dream-{stamp} {}\n",
+            head.trim()
+        ));
+        for n in 2..100 {
+            refs.push_str(&format!(
+                "create refs/heads/mezha/dream-{stamp}-{n} {}\n",
+                head.trim()
+            ));
+        }
+    }
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(&s.p.root)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &s.p.home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), refs.as_bytes()).unwrap();
+    let created = child.wait_with_output().unwrap();
+    assert!(created.status.success(), "{}", stderr(&created));
+    let out = s.dream("write", &["--role", "implementer"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("too many branches named mezha/dream-"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(s.branches().len(), 5 * 99, "nothing was added");
+}
+
+#[test]
+fn transcripts_too_large_to_read_are_counted_not_read() {
+    let s = setup();
+    let dir =
+        s.p.home
+            .join(".claude/projects")
+            .join(project_dir_name(&s.p.root.to_string_lossy()));
+    // A sparse file beyond the limit: nothing is read from it.
+    let big = fs::File::create(dir.join("s-big.jsonl")).unwrap();
+    big.set_len(65 << 20).unwrap();
+    let out = s.dream("write", &["--dry-run", "--role", "implementer"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert!(
+        e.contains("note: 1 transcript(s) were too large to read"),
+        "{e}"
+    );
+    assert!(o.contains("implementer    project  1 run(s)"), "{o}");
+}
+
+#[test]
+fn runs_that_do_not_fit_one_dream_wait_for_the_next() {
+    let s = setup();
+    // Sixteen runs with ~12 KB digests each: more than one inbox holds.
+    let pad = " lorem ipsum dolor sit amet".repeat(230);
+    for n in 0..16 {
+        transcript_padded(
+            &s.p,
+            &s.p.root,
+            "implementer",
+            &format!("p{n}"),
+            n * 10,
+            &pad,
+        );
+    }
+    let out = s.dream("write", &["--dry-run", "--role", "implementer"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    let line = o
+        .lines()
+        .find(|l| l.contains("left for the next dream"))
+        .unwrap_or_else(|| panic!("{o}"));
+    assert!(line.starts_with("  implementer    project  "), "{line}");
+    let ws = s.workspaces().pop().unwrap();
+    let digests = fs::read_dir(ws.join("inbox/implementer")).unwrap().count();
+    assert!(digests < 17 && digests > 1, "{digests} digests");
 }

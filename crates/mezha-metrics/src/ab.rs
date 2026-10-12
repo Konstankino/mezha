@@ -386,6 +386,42 @@ agent = "nobody"
     }
 
     #[test]
+    fn settings_fall_back_to_the_defaults() {
+        let s = Settings::default();
+        assert_eq!(
+            (s.budget_usd(), s.max_turns(), s.timeout_minutes()),
+            (
+                DEFAULT_BUDGET_USD,
+                DEFAULT_MAX_TURNS,
+                DEFAULT_TIMEOUT_MINUTES
+            )
+        );
+        let s = parse("[ab]\nbudget_usd = 3.5\nmax_turns = 10\ntimeout_minutes = 5\n")
+            .unwrap()
+            .ab;
+        assert_eq!(
+            (s.budget_usd(), s.max_turns(), s.timeout_minutes()),
+            (3.5, 10, 5)
+        );
+    }
+
+    #[test]
+    fn limits_on_turns_timeouts_and_model_names() {
+        let all = errors(
+            "[ab]\nmodel = \"claude sonnet\"\nmax_turns = 0\ntimeout_minutes = 500\n\
+             [[task]]\nname = \"t\"\nprompt = \"p\"\nagent = \"implementer\"\n",
+        );
+        assert_eq!(
+            all,
+            [
+                "ab.model `claude sonnet` is not a model name",
+                "ab.max_turns must be between 1 and 200",
+                "ab.timeout_minutes must be between 1 and 240"
+            ]
+        );
+    }
+
+    #[test]
     fn order_alternates() {
         let order = run_order(2, 2);
         let first: Vec<Variant> = order.chunks(2).map(|p| p[0].2).collect();
@@ -439,5 +475,35 @@ agent = "nobody"
             "{md}"
         );
         assert!(md.contains("Not enough runs"), "{md}");
+    }
+
+    #[test]
+    fn enough_repeats_allow_a_claim() {
+        let rows: Vec<AbRow> = (0..MIN_REPEAT_FOR_CLAIMS)
+            .flat_map(|r| {
+                [
+                    row("a", Variant::Memory, r, false),
+                    row("a", Variant::Empty, r, true),
+                ]
+            })
+            .collect();
+        let s = summarize(&rows);
+        assert!(!s.too_few);
+        assert_eq!(s.repeat, MIN_REPEAT_FOR_CLAIMS);
+        assert_eq!(
+            (s.tasks["a"].memory_only, s.tasks["a"].empty_only),
+            (0, MIN_REPEAT_FOR_CLAIMS)
+        );
+        let md = markdown(&s);
+        assert!(
+            md.contains(
+                "| a | 0/3 passed, $1.50, 4.0 turns | 3/3 passed, $1.50, 4.0 turns | 0 | 3 |"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("Small samples are noisy"), "{md}");
+        assert!(!md.contains("Not enough runs"), "{md}");
+        let none = summarize(&[]);
+        assert!(none.tasks.is_empty() && none.stamp.is_empty() && none.too_few);
     }
 }

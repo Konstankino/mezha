@@ -69,6 +69,28 @@ jobs:
           export CARGO_TARGET_DIR="$HOME/target"
           cargo test --workspace --all-targets --locked --no-fail-fast
 
+  # Line coverage of the workspace, measured where every test runs (the
+  # listener tests in mezha-verify need to bind a local port). The floor
+  # keeps it from drifting; README "Development" says how to measure.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Built from crates.io with its lockfile: no binary download, no
+      # unpinned action.
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked --version 0.9.0
+      - name: Coverage
+        run: cargo llvm-cov --workspace --all-targets --locked --fail-under-lines 95
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest

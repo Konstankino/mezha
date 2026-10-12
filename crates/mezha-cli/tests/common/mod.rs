@@ -16,6 +16,10 @@ pub struct Project {
     pub base: PathBuf,
     pub home: PathBuf,
     pub root: PathBuf,
+    /// `TMPDIR` for the mezha under test: its scratch directories land here,
+    /// not in `/tmp` (which a sandbox may refuse), and not where the test
+    /// keeps its stand-in programs, which mezha distrusts under `TMPDIR`.
+    pub tmp: PathBuf,
 }
 
 impl Project {
@@ -26,13 +30,16 @@ impl Project {
         let base = fs::canonicalize(tmp.path()).unwrap();
         let home = base.join("home");
         let root = base.join("repo");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&root).unwrap();
+        let scratch = base.join("tmp");
+        for dir in [&home, &root, &scratch] {
+            fs::create_dir_all(dir).unwrap();
+        }
         Project {
             _tmp: tmp,
             base,
             home,
             root,
+            tmp: scratch,
         }
     }
 
@@ -56,17 +63,24 @@ impl Project {
             .env_clear()
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
+            .env("TMPDIR", &self.tmp)
             .stdin(Stdio::null());
-        if let Some(path) = std::env::var_os("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Some(root) = std::env::var_os("SYSTEMROOT") {
-            cmd.env("SYSTEMROOT", root);
-        }
+        pass_through(&mut cmd);
         for (k, v) in extra {
             cmd.env(k, v);
         }
         cmd.output().unwrap()
+    }
+}
+
+/// What a process started from an empty environment still needs from this
+/// one: `PATH` to find git and the stand-ins, `SYSTEMROOT` on Windows, and
+/// `LLVM_PROFILE_FILE` so a coverage run records what the child executed.
+pub fn pass_through(cmd: &mut Command) {
+    for key in ["PATH", "SYSTEMROOT", "LLVM_PROFILE_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -80,11 +94,10 @@ pub fn stderr(out: &Output) -> String {
 
 /// Runs `cmd` (a command string) under bash with `input` on stdin.
 pub fn bash(cmd: &str, cwd: &Path, env: &[(&str, &str)], input: &[u8]) -> Output {
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .env_clear()
+    let mut bash = Command::new("bash");
+    bash.arg("-c").arg(cmd).current_dir(cwd).env_clear();
+    pass_through(&mut bash);
+    let mut child = bash
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

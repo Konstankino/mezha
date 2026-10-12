@@ -111,6 +111,21 @@ mod tests {
     }
 
     #[test]
+    fn a_fence_closes_only_with_its_own_marker() {
+        // The `~~~` inside the backtick fence doesn't close it, so the first
+        // heading is still code.
+        let text = "```\n~~~\n## Lessons\n- inside\n```\n\n## Lessons\n- outside\n";
+        assert_eq!(
+            heading_section(text, "Lessons").as_deref(),
+            Some("- outside")
+        );
+        assert_eq!(
+            heading_section("~~~\n```\n## Lessons\n- in code\n", "Lessons"),
+            None
+        );
+    }
+
+    #[test]
     fn items() {
         assert_eq!(item_count("- a\n- b\n  more\n1. c"), 3);
         assert_eq!(item_count("None."), 0);

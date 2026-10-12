@@ -351,5 +351,84 @@ mod tests {
             classify(&denied, NONCE, Scheme::Ssh, Platform::MacOs),
             Outcome::AuthDenied
         );
+        // With no marker at all, ssh on macOS says nothing either way.
+        let nothing = out(&["ssh: something unexpected"]);
+        assert_eq!(
+            classify(&nothing, NONCE, Scheme::Ssh, Platform::MacOs),
+            Outcome::Inconclusive(
+                "ssh fails inside srt on macOS whether or not the host is allowed".into()
+            )
+        );
+        assert_eq!(
+            classify(&nothing, NONCE, Scheme::Ssh, Platform::Linux),
+            Outcome::Inconclusive("no known message".into())
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_inconclusive() {
+        assert_eq!(
+            https(&["fatal: unable to access 'https://h/': Connection timed out after 10001 ms"]),
+            Outcome::Inconclusive("the connection timed out".into())
+        );
+        assert_eq!(
+            https(&["ssh: connect to host h port 22: Timeout"]),
+            Outcome::Inconclusive("the connection timed out".into())
+        );
+        // A `fatal:` line that matches nothing known is quoted, cut short.
+        let long = format!("fatal: {}", "x".repeat(300));
+        let outcome = https(&[&long]);
+        let Outcome::Inconclusive(why) = &outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(why.chars().count(), 160, "{why}");
+        assert!(why.starts_with("fatal: xxx"), "{why}");
+    }
+
+    #[test]
+    fn what_each_outcome_proves() {
+        use Outcome::*;
+        let all = [
+            Blocked,
+            Unauthenticated,
+            ReachedNoAuth,
+            CredentialRejected,
+            AuthDenied,
+            PushSession,
+            Inconclusive("why".into()),
+        ];
+        let shown: Vec<bool> = all.iter().map(Outcome::credential_shown).collect();
+        assert_eq!(
+            shown,
+            [false, false, false, true, true, true, false],
+            "{all:?}"
+        );
+        let open: Vec<Option<bool>> = all.iter().map(Outcome::network_open).collect();
+        assert_eq!(
+            open,
+            [
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                None
+            ],
+            "{all:?}"
+        );
+        let described: Vec<String> = all.iter().map(Outcome::describe).collect();
+        assert_eq!(
+            described,
+            [
+                "refused by the sandbox proxy",
+                "reachable, the server asked for a credential",
+                "reachable (ssh stopped before offering a credential)",
+                "reachable, and a credential was offered and rejected",
+                "reachable, and a credential reached the server",
+                "reachable, and the server accepted a push session",
+                "inconclusive (why)",
+            ]
+        );
     }
 }

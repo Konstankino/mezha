@@ -676,6 +676,31 @@ mod tests {
     }
 
     #[test]
+    fn config_dir_honours_the_variable() {
+        let home = Path::new("/home/u");
+        assert_eq!(config_dir(|_| None, home), PathBuf::from("/home/u/.claude"));
+        assert_eq!(
+            config_dir(|_| Some(String::new()), home),
+            PathBuf::from("/home/u/.claude")
+        );
+        assert_eq!(
+            config_dir(
+                |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/cfg/claude".to_string()),
+                home
+            ),
+            PathBuf::from("/cfg/claude")
+        );
+    }
+
+    #[test]
+    fn base36_digits() {
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+        assert_eq!(base36(1_295), "zz");
+    }
+
+    #[test]
     fn within_roots() {
         assert!(within("/a/b", "/a/b"));
         assert!(within("/a/b/c", "/a/b/"));

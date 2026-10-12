@@ -148,6 +148,21 @@ mod tests {
     }
 
     #[test]
+    fn nothing_to_write_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m");
+        let store = Store::new(&path);
+        assert_eq!(store.dir(), path);
+        store.upsert(SESSIONS, "id", &[]).unwrap();
+        assert!(!path.exists(), "{}", path.display());
+        let err = store
+            .upsert(SESSIONS, "id", &[json!({"v": 1})])
+            .unwrap_err();
+        assert_eq!(err.to_string(), "a row without `id`");
+        assert!(store.read(SESSIONS, "id").is_empty());
+    }
+
+    #[test]
     fn concurrent_writers_lose_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m");

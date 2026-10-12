@@ -71,3 +71,51 @@ pub fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taken_name_gets_a_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = fresh_dir(tmp.path(), "20261009T041231Z").unwrap();
+        assert_eq!(first, tmp.path().join("20261009T041231Z"));
+        let second = fresh_dir(tmp.path(), "20261009T041231Z").unwrap();
+        assert_eq!(second, tmp.path().join("20261009T041231Z-2"));
+        assert!(second.is_dir(), "{} wasn't created", second.display());
+    }
+
+    #[test]
+    fn fresh_dir_gives_up_after_too_many_and_reports_other_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        for _ in 0..99 {
+            fresh_dir(tmp.path(), "s").unwrap();
+        }
+        let err = fresh_dir(tmp.path(), "s").unwrap_err().to_string();
+        assert!(err.contains("too many dreams named s in"), "{err}");
+
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let err = format!("{:#}", fresh_dir(&file, "s").unwrap_err());
+        assert!(
+            err.starts_with(&file.join("s").display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn replace_file_writes_through_a_temporary_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MEMORY.md");
+        replace_file(&path, b"one\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+        replace_file(&path, b"two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+        let left: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["MEMORY.md"], "{left:?}");
+    }
+}

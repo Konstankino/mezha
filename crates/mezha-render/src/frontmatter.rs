@@ -132,6 +132,15 @@ hooks:
     }
 
     #[test]
+    fn refuses_collections_nested_in_a_list() {
+        for nested in [json!([[1]]), json!([{}]), json!([{"a": [[1]]}])] {
+            let err = write(&[("x", nested.clone())]).unwrap_err();
+            assert_eq!(err, "nested lists aren't used in frontmatter", "{nested}");
+        }
+        assert_eq!(write(&[("x", json!({}))]).unwrap(), "---\nx: {}\n---\n");
+    }
+
+    #[test]
     fn refuses_what_would_break_the_block() {
         assert!(write(&[("description", json!("a --- b"))]).is_err());
         assert!(write(&[("description", json!("sep\u{2028}"))]).is_err());

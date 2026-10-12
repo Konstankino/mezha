@@ -713,6 +713,58 @@ prompt = "p"
     }
 
     #[test]
+    fn settings_fall_back_to_the_defaults() {
+        let s = Settings::default();
+        assert_eq!(
+            (
+                s.budget_usd(),
+                s.max_turns(),
+                s.trigger_turns(),
+                s.timeout_minutes()
+            ),
+            (
+                DEFAULT_BUDGET_USD,
+                DEFAULT_MAX_TURNS,
+                DEFAULT_TRIGGER_TURNS,
+                DEFAULT_TIMEOUT_MINUTES
+            )
+        );
+        let s = parse(
+            "[eval]\nbudget_usd = 2.5\nmax_turns = 12\ntrigger_turns = 2\ntimeout_minutes = 9\n",
+        )
+        .unwrap()
+        .eval;
+        assert_eq!(
+            (
+                s.budget_usd(),
+                s.max_turns(),
+                s.trigger_turns(),
+                s.timeout_minutes()
+            ),
+            (2.5, 12, 2, 9)
+        );
+    }
+
+    #[test]
+    fn limits_on_turns_timeouts_and_empty_prompts() {
+        let all = errors(
+            "[eval]\nmodel = \"a b\"\nmax_turns = 201\ntimeout_minutes = 0\n\
+             [[trigger]]\nprompt = \" \"\nshould_trigger = true\n\
+             [[trigger]]\nprompt = \"b\"\nshould_trigger = false\n",
+            "rust-conventions",
+        );
+        assert_eq!(
+            all,
+            [
+                "eval.model `a b` is not a model name",
+                "eval.max_turns must be between 1 and 200",
+                "eval.timeout_minutes must be between 1 and 240",
+                "trigger 1: the prompt is empty"
+            ]
+        );
+    }
+
+    #[test]
     fn messages_against_patterns() {
         let file = parse(
             "[[task]]\nname = \"t\"\nprompt = \"p\"\nexpect = [\"(?i)timeout\", \"test\"]\nreject = [\"unwrap\\\\(\\\\)\"]\n",
@@ -873,6 +925,73 @@ prompt = "p"
         assert!(md.contains("didn't load the skill in 1 of 2 runs"), "{md}");
         assert!(md.contains("Not enough runs"), "{md}");
         assert!(!md.contains("## Triggers"), "{md}");
+    }
+
+    #[test]
+    fn undeclared_tools_and_enough_repeats() {
+        let rows: Vec<EvalRow> = (0..MIN_REPEAT_FOR_CLAIMS)
+            .flat_map(|r| {
+                let mut with = row(Kind::Task, "a", Arm::With, r);
+                with.passed = Some(false);
+                with.loaded = true;
+                with.undeclared_tools = vec!["WebFetch".into(), "Bash outside its scopes".into()];
+                let mut without = row(Kind::Task, "a", Arm::Without, r);
+                without.passed = Some(true);
+                [with, without]
+            })
+            .collect();
+        let s = summarize(&rows);
+        assert!(!s.too_few);
+        assert_eq!(
+            (s.tasks["a"].with_only, s.tasks["a"].without_only),
+            (0, MIN_REPEAT_FOR_CLAIMS)
+        );
+        assert_eq!(s.loaded_runs, MIN_REPEAT_FOR_CLAIMS);
+        assert_eq!(
+            s.undeclared,
+            BTreeMap::from([
+                ("Bash outside its scopes".to_string(), 3),
+                ("WebFetch".to_string(), 3)
+            ])
+        );
+        let md = markdown(&s, &[], 4);
+        assert!(md.contains("Small samples are noisy"), "{md}");
+        assert!(!md.contains("Not enough runs"), "{md}");
+        assert!(
+            md.contains(
+                "doesn't declare: Bash outside its scopes (3 of 3 runs), WebFetch ✗ (3 of 3 runs). "
+            ),
+            "{md}"
+        );
+        assert!(md.ends_with("Cost: $1.50.\n"), "{md}");
+    }
+
+    #[test]
+    fn precision_at_the_target_needs_no_remark() {
+        let s = summarize(&[trigger(1, true, true), trigger(2, false, false)]);
+        assert_eq!((s.precision, s.recall), (Some(1.0), Some(1.0)));
+        let md = markdown(&s, &["a".into(), "b".into()], 4);
+        assert!(
+            md.contains(
+                "Precision 100%: 1 of 1 loads were wanted. Recall 100%: 1 of 1 wanted loads happened.\n\n"
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("below the"), "{md}");
+        assert!(!md.contains("never loaded"), "{md}");
+        assert!(
+            md.contains("called only tools its `allowed_tools` declares"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn tools_that_reach_outside_the_sandbox() {
+        assert!(reaches_outside("WebFetch"));
+        assert!(reaches_outside("WebSearch"));
+        assert!(reaches_outside("mcp__github__create_issue"));
+        assert!(!reaches_outside("Bash"));
+        assert!(!reaches_outside("Read"));
     }
 
     #[test]

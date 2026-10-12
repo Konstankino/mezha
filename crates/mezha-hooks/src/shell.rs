@@ -600,6 +600,112 @@ mod tests {
     }
 
     #[test]
+    fn reads_backslashes_and_backticks_in_every_quoting() {
+        // A backslash outside quotes keeps the next character; inside
+        // double quotes it joins lines, escapes the four special
+        // characters, and stays otherwise.
+        assert_eq!(words("echo a\\ b"), [vec!["echo", "a b"]]);
+        assert_eq!(
+            words("echo \"a\\\nb\" \"c\\d\" \"\\$x\""),
+            [vec!["echo", "ab", "c\\d", "$x"]]
+        );
+        // A backtick inside double quotes still runs a command.
+        assert_eq!(words("echo \"`date`\""), [vec!["date"], vec!["echo", ""]]);
+        // Inside backticks, a backslash escapes a backtick, a backslash or
+        // a dollar; before anything else it is kept.
+        assert_eq!(
+            words("echo `printf \\`x\\` \\$y`"),
+            [vec!["x"], vec!["printf", "", ""], vec!["echo", ""]]
+        );
+        assert_eq!(
+            words("echo `printf \\n`"),
+            [vec!["printf", "n"], vec!["echo", ""]]
+        );
+        // A stray `)` at the top level ends the command and nothing more.
+        assert_eq!(
+            words("echo x) echo y"),
+            [vec!["echo", "x"], vec!["echo", "y"]]
+        );
+    }
+
+    #[test]
+    fn reads_every_dollar_form() {
+        let src = "echo $((1 + (2))) ${x:-{a}} $'a\\tb\\'c' $\"d\" $@ $* $# $? $$ $! $- a$ b";
+        let cmds = parse(src, 0).unwrap();
+        let seen: Vec<(&str, bool)> = cmds[0]
+            .words
+            .iter()
+            .map(|w| (w.text.as_str(), w.dynamic))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("echo", false),
+                ("", true),
+                ("", true),
+                ("atb'c", true),
+                ("d", false),
+                ("", true),
+                ("", true),
+                ("", true),
+                ("", true),
+                ("", true),
+                ("", true),
+                ("", true),
+                ("a$", false),
+                ("b", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_delimiters_may_be_spaced_quoted_or_escaped() {
+        let cmds = parse("cat << EOF\ngit push\nEOF\ncat <<\\END\nx\nEND\n", 0).unwrap();
+        assert_eq!(cmds[0].heredocs[0].body, "git push\n");
+        assert!(!cmds[0].heredocs[0].quoted);
+        assert_eq!(cmds[1].heredocs[0].body, "x\n");
+        assert!(
+            cmds[1].heredocs[0].quoted,
+            "a backslash quotes the delimiter"
+        );
+    }
+
+    #[test]
+    fn process_substitution_runs_a_command() {
+        let cmds = parse("diff <(git push) >(wc -l)", 0).unwrap();
+        let firsts: Vec<_> = cmds.iter().map(|c| c.words[0].text.as_str()).collect();
+        assert_eq!(firsts, ["git", "wc", "diff"]);
+        assert_eq!(cmds[2].words.len(), 1);
+        assert!(cmds[2].redirects.is_empty(), "{:?}", cmds[2].redirects);
+    }
+
+    #[test]
+    fn reports_unterminated_expansions_and_heredocs() {
+        assert_eq!(parse("echo $((1", 0), Err(ParseError::Unterminated("$((")));
+        assert_eq!(parse("echo ${x", 0), Err(ParseError::Unterminated("${")));
+        assert_eq!(parse("echo $'x", 0), Err(ParseError::Unterminated("$'")));
+        assert_eq!(parse("echo $'x\\", 0), Err(ParseError::Unterminated("$'")));
+        assert_eq!(parse("echo $\"x", 0), Err(ParseError::Unterminated("\"")));
+        assert_eq!(parse("cat <<'EOF", 0), Err(ParseError::Unterminated("<<")));
+        assert_eq!(parse("cat <<", 0), Err(ParseError::Unterminated("<<")));
+        assert_eq!(parse("cat <<\\", 0), Err(ParseError::Unterminated("<<")));
+        assert_eq!(parse("cat << ;", 0), Err(ParseError::Unterminated("<<")));
+        // Inside double quotes, backticks and a process substitution.
+        assert_eq!(parse("echo \"$(x", 0), Err(ParseError::Unterminated("$(")));
+        assert_eq!(parse("echo \"`x", 0), Err(ParseError::Unterminated("`")));
+        assert_eq!(
+            parse("echo `echo 'x`", 0),
+            Err(ParseError::Unterminated("'"))
+        );
+        assert_eq!(parse("echo &>(x", 0), Err(ParseError::Unterminated("$(")));
+    }
+
+    #[test]
+    fn a_trailing_backslash_escapes_nothing() {
+        assert_eq!(words("echo a\\"), [vec!["echo", "a"]]);
+    }
+
+    #[test]
     fn reports_unterminated_input() {
         assert_eq!(parse("echo 'x", 0), Err(ParseError::Unterminated("'")));
         assert_eq!(parse("echo \"x", 0), Err(ParseError::Unterminated("\"")));

@@ -254,7 +254,57 @@ fn approved(layers: &Layers) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::redirects;
+    use super::{approved, redirects, unauthenticated_local};
+    use crate::layers::{Layer, Layers, Scope};
+    use serde_json::json;
+
+    #[test]
+    fn local_servers_without_a_token() {
+        let names = |v: serde_json::Value| -> Vec<(String, String)> { unauthenticated_local(&v) };
+        assert!(names(json!({})).is_empty());
+        assert!(names(json!({"mcpServers": {"fs": {"command": "x"}}})).is_empty());
+        let found = names(json!({"mcpServers": {
+            "notes": {"type": "http", "url": "http://localhost:7777/mcp"},
+            "board": {"type": "sse", "url": "wss://app.localhost/events"},
+            "any": {"url": "ws://0.0.0.0:1/"},
+            "odd": {"url": "not a url"},
+            "remote": {"url": "https://mcp.example/"},
+            "keyed": {"url": "http://127.0.0.1:1/", "headers": {"X-API-Key": "k"}},
+            "helped": {"url": "http://127.0.0.1:1/", "headersHelper": "x"},
+        }}));
+        assert_eq!(
+            found,
+            [
+                ("any".to_string(), "ws://0.0.0.0:1/".to_string()),
+                (
+                    "board".to_string(),
+                    "wss://app.localhost/events".to_string()
+                ),
+                ("notes".to_string(), "http://localhost:7777/mcp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn approvals_minus_rejections() {
+        let layer = |scope, value| Layer {
+            scope,
+            label: format!("{scope:?}"),
+            value,
+        };
+        let layers = Layers {
+            layers: vec![
+                layer(
+                    Scope::User,
+                    json!({"enabledMcpjsonServers": ["b", "a", "a"], "disabledMcpjsonServers": ["b"]}),
+                ),
+                layer(Scope::Local, json!({"enabledMcpjsonServers": ["c"]})),
+            ],
+            ..Layers::default()
+        };
+        assert_eq!(approved(&layers), ["a", "c"]);
+        assert!(approved(&Layers::default()).is_empty());
+    }
 
     #[test]
     fn redirecting_env() {

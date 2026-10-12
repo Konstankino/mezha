@@ -220,4 +220,74 @@ mod tests {
     fn stamps() {
         assert_eq!(stamp(1_800_000_000), "20270115T080000Z");
     }
+
+    #[test]
+    fn an_inbox_spans_its_runs() {
+        let empty = RoleInbox::default();
+        assert_eq!((empty.first(), empty.through()), (None, None));
+        let digest = |end: i64| Digest {
+            file: format!("{end}.md"),
+            text: String::new(),
+            end,
+            redactions: 0,
+        };
+        let inbox = RoleInbox {
+            digests: vec![digest(20), digest(10), digest(15)],
+            left: 0,
+            redactions: 0,
+        };
+        assert_eq!((inbox.first(), inbox.through()), (Some(10), Some(20)));
+    }
+
+    #[test]
+    fn digests_cap_the_failed_calls_and_skip_empty_parts() {
+        let run = Run {
+            role: "implementer".into(),
+            id: "a1".into(),
+            session: "s1".into(),
+            kind: RunKind::Subagent,
+            start: 1_800_000_000,
+            end: 1_800_000_060,
+            branch: None,
+            task: String::new(),
+            final_text: "  \n".into(),
+            failures: (1..=MAX_FAILURES + 3)
+                .map(|i| crate::transcripts::Failure {
+                    tool: "Bash".into(),
+                    input: format!("cargo test {i}"),
+                    output: format!("error {i}"),
+                })
+                .collect(),
+            followups: Vec::new(),
+        };
+        let d = digest(&run, false);
+        let text = &d.text;
+        assert_eq!(d.file, "20270115T080100Z-a1.md");
+        assert_eq!(d.end, run.end);
+        assert_eq!(d.redactions, 0);
+        assert!(
+            text.contains(&format!("- Failed tool calls: {}\n", MAX_FAILURES + 3)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("\n{MAX_FAILURES}. `Bash`\n")),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!("\n{}. `Bash`\n", MAX_FAILURES + 1)),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n[mezha: 3 more failed calls not shown]\n"),
+            "{text}"
+        );
+        for absent in [
+            "- Branch:",
+            "## Task",
+            "## Final message",
+            "## Your next message",
+        ] {
+            assert!(!text.contains(absent), "{absent} is in:\n{text}");
+        }
+    }
 }

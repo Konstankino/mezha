@@ -95,6 +95,36 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_git_file_without_a_gitdir_line_marks_its_own_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, text) in [("odd", "not a gitdir line\n"), ("empty", "")] {
+            let dir = canon(tmp.path()).join(name);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(dir.join(".git"), text).unwrap();
+            assert_eq!(repo_root(&dir.join("src")), dir, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_missing_start_is_kept_as_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("missing/deep");
+        let root = repo_root(&dir);
+        assert!(root == dir || dir.starts_with(&root), "{}", root.display());
+    }
+
+    #[test]
+    fn windows_verbatim_prefixes_are_stripped() {
+        let strip = |p: &str| strip_verbatim(PathBuf::from(p));
+        assert_eq!(strip(r"\\?\C:\work\repo"), PathBuf::from(r"C:\work\repo"));
+        assert_eq!(
+            strip(r"\\?\UNC\server\share\repo"),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(strip("/work/repo"), PathBuf::from("/work/repo"));
+    }
+
+    #[test]
     fn outside_a_repository_the_start_is_the_root() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = canon(tmp.path()).join("plain");

@@ -28,30 +28,39 @@ memory = { scope = "project" }
 "#;
 
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.285 (Claude Code)"; exit 0; fi
-agent=""; mode=""; persist=1; settings=""
+if [ "$1" = "--version" ]; then echo "${FAKE_VERSION:-2.1.285 (Claude Code)}"; exit 0; fi
+agent=""; mode=""; persist=1; settings=""; model=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent) agent="$2"; shift ;;
     --permission-mode) mode="$2"; shift ;;
     --no-session-persistence) persist=0 ;;
     --settings) settings="$2"; shift ;;
-    --output-format|--max-turns|--max-budget-usd|--permission-prompts|--model) shift ;;
+    --model) model="$2"; shift ;;
+    --output-format|--max-turns|--max-budget-usd|--permission-prompts) shift ;;
     -p|--verbose|--strict-mcp-config) ;;
     *) echo "unexpected argument: $1" >&2; exit 9 ;;
   esac
   shift
 done
-[ "$mode" = acceptEdits ] && [ "$persist" = 0 ] && [ "$agent" = implementer ] || { echo "bad arguments" >&2; exit 9; }
+[ "$mode" = acceptEdits ] && [ "$persist" = 0 ] || { echo "bad arguments" >&2; exit 9; }
+case "$agent" in implementer|tester) ;; *) echo "bad agent: $agent" >&2; exit 9 ;; esac
 [ -z "$CLAUDE_CODE_DISABLE_AUTO_MEMORY" ] || { echo "agent memory would be off" >&2; exit 9; }
 case "$settings" in *'Edit(~/.claude/projects/**)'*) ;; *) echo "auto memory writable" >&2; exit 9 ;; esac
 pwd >> "$FAKE_LOG"
 git log -1 --format=%s >> "$FAKE_LOG"
+[ -n "$model" ] && echo "model=$model" >> "$FAKE_LOG"
 cat > /dev/null
-printf '{"type":"system","subtype":"init","tools":["Bash","Edit"],"mcp_servers":[],"permissionMode":"acceptEdits","agents":["implementer"],"claude_code_version":"2.1.285"}\n'
-if [ "$FAKE_MODE" = budget ]; then
-  printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":0.4}\n'; exit 1
-fi
+echo 'not json, as a stray line of output'
+[ "$FAKE_MODE" = noinit ] && exit 0
+version=2.1.285
+[ "$FAKE_MODE" = badinit ] && version=9.9.9
+printf '{"type":"system","subtype":"init","tools":["Bash","Edit"],"mcp_servers":[],"permissionMode":"acceptEdits","agents":["implementer","tester"],"claude_code_version":"%s"}\n' "$version"
+case "$FAKE_MODE" in
+  badinit) sleep 30; exit 0 ;;
+  noresult) exit 0 ;;
+  budget) printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":0.4}\n'; exit 1 ;;
+esac
 echo work > work.txt
 printf '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.1,"result":"done"}\n'
 "#;
@@ -128,6 +137,10 @@ fn setup() -> Setup {
 
 impl Setup {
     fn ab(&self, mode: &str, args: &[&str]) -> Output {
+        self.ab_env(mode, args, &[])
+    }
+
+    fn ab_env(&self, mode: &str, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let mezha_dir = Path::new(common::BIN).parent().unwrap();
         let path = format!(
             "{}:{}:/usr/bin:/bin",
@@ -138,14 +151,22 @@ impl Setup {
         let tasks = self.tasks.to_string_lossy().into_owned();
         let mut full = vec!["metrics", "--ab", tasks.as_str()];
         full.extend_from_slice(args);
-        self.p.mezha_env(
-            &full,
-            &[
-                ("PATH", path.as_str()),
-                ("FAKE_MODE", mode),
-                ("FAKE_LOG", log.as_str()),
-            ],
-        )
+        let mut env = vec![
+            ("PATH", path.as_str()),
+            ("FAKE_MODE", mode),
+            ("FAKE_LOG", log.as_str()),
+        ];
+        env.extend_from_slice(extra);
+        self.p.mezha_env(&full, &env)
+    }
+
+    fn rows(&self) -> Vec<serde_json::Value> {
+        let store = mezha_memory::metrics_dir(&self.p.home, &self.p.root);
+        fs::read_to_string(store.join("ab.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
 }
 
@@ -310,4 +331,204 @@ fn refuses_runs_that_cant_differ() {
         stderr(&out)
     );
     assert!(!s.log.exists(), "nothing ran");
+}
+
+#[test]
+fn a_task_without_a_check_passes_when_the_session_succeeds() {
+    let s = setup();
+    write(
+        &s.tasks,
+        "[ab]\nbudget_usd = 0.5\nmodel = \"claude-test\"\n\n[[task]]\nname = \"free\"\nprompt = \"Do it.\"\nagent = \"implementer\"\n",
+    );
+    let out = s.ab("ok", &["--yes"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(!o.contains("check for"), "{o}");
+    assert!(o.contains("| free | 1/1 passed"), "{o}");
+    let log = fs::read_to_string(&s.log).unwrap();
+    assert_eq!(log.matches("model=claude-test").count(), 2, "{log}");
+    let rows = s.rows();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|r| r["passed"] == true), "{rows:?}");
+
+    // Without a check, a session that fails is a failed run.
+    write(
+        &s.tasks,
+        "[[task]]\nname = \"fails\"\nprompt = \"Do it.\"\nagent = \"implementer\"\n",
+    );
+    let out = s.ab("budget", &["--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let rows = s.rows();
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    let failed: Vec<&serde_json::Value> = rows.iter().filter(|r| r["passed"] == false).collect();
+    assert_eq!(failed.len(), 2, "{rows:?}");
+    assert!(failed.iter().all(|r| r["task"] == "fails"), "{failed:?}");
+    assert!(
+        failed
+            .iter()
+            .all(|r| r["failure"].as_str().unwrap().contains("budget")),
+        "{failed:?}"
+    );
+}
+
+#[test]
+fn local_memory_is_copied_into_the_memory_variant() {
+    let s = setup();
+    s.p.write_spec(&format!(
+        "{SPEC}\n[agent.tester]\ndescription = \"Runs the tests.\"\ntools = [\"Read\"]\nrule_of_two = [\"private_data\"]\nmemory = {{ scope = \"local\" }}\n"
+    ));
+    write(
+        &s.p.root.join(".claude/agents/tester.md"),
+        "---\nname: \"tester\"\n---\n\nTest.\n",
+    );
+    write(
+        &s.p.root.join(".gitignore"),
+        ".claude/agent-memory-local/\n",
+    );
+    git(&s.p.root, &s.p.home, &["add", "-A"]);
+    git(&s.p.root, &s.p.home, &["commit", "-q", "-m", "tester"]);
+    write(
+        &s.p.root.join(".claude/agent-memory-local/tester/MEMORY.md"),
+        "- a local lesson\n",
+    );
+    write(
+        &s.tasks,
+        "[[task]]\nname = \"local\"\nprompt = \"Do it.\"\nagent = \"tester\"\ncheck = \"grep -q 'a local lesson' .claude/agent-memory-local/tester/MEMORY.md\"\n",
+    );
+    let out = s.ab("ok", &["--yes"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("| local | 1/1 passed"), "{o}");
+    assert!(o.contains("| 0/1 passed"), "{o}");
+    let store = mezha_memory::metrics_dir(&s.p.home, &s.p.root);
+    let report_dir = fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("ab-"))
+        .unwrap();
+    let diff = fs::read_to_string(report_dir.join("local-memory-0.diff")).unwrap();
+    assert!(diff.contains("+work"), "{diff}");
+    assert!(!diff.contains("agent-memory-local"), "{diff}");
+    assert!(
+        !s.p.root
+            .join(".claude/agent-memory-local/tester/MEMORY.md~")
+            .exists(),
+        "the real memory is untouched"
+    );
+}
+
+#[test]
+fn sessions_that_start_wrong_stop_the_run() {
+    let s = setup();
+    let out = s.ab("badinit", &["--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(
+            "The A/B run stopped: Claude Code changed from 2.1.285 to 9.9.9 during the run; start again"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.ab("noinit", &["--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out)
+            .contains("The A/B run stopped: claude didn't report how it started (exit Some(0))"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(s.rows().is_empty(), "{:?}", s.rows());
+    let worktrees = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&s.p.root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        stdout(&worktrees).lines().count(),
+        1,
+        "{}",
+        stdout(&worktrees)
+    );
+
+    // A session that ends without a result is a failed run, not a stopped one.
+    let out = s.ab("noresult", &["--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let rows = s.rows();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row["subtype"], "no-result", "{row}");
+        assert!(
+            row["failure"]
+                .as_str()
+                .unwrap()
+                .starts_with("it ended without a result (exit Some(0))"),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn claude_and_mezha_must_be_found_and_recent() {
+    let s = setup();
+    // The project's hooks call mezha: without one where agents can't
+    // write, every tool call would be blocked.
+    let path = format!("{}:/usr/bin:/bin", s.bin.display());
+    let out = s.p.mezha_env(
+        &["metrics", "--ab", s.tasks.to_str().unwrap(), "--yes"],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_LOG", s.log.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("mezha isn't on PATH where agents can't write"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = s.ab_env("ok", &["--yes"], &[("FAKE_VERSION", "banana")]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("`claude --version` said banana, not a version"),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.ab_env("ok", &["--yes"], &[("FAKE_VERSION", "1.0.0 (Claude Code)")]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Claude Code 1.0.0 (Claude Code) is too old; update it"),
+        "{}",
+        stderr(&out)
+    );
+    // One that can't start at all.
+    write(&s.bin.join("claude"), "#!/nonexistent/interpreter\n");
+    let out = s.ab("ok", &["--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("error:") && stderr(&out).contains("os error"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.log.exists(), "nothing ran");
+}
+
+#[test]
+fn a_run_that_cannot_be_recorded_is_a_note() {
+    let s = setup();
+    let store = mezha_memory::metrics_dir(&s.p.home, &s.p.root);
+    // A directory where the store's file should be: nothing can be written.
+    fs::create_dir_all(store.join("ab.jsonl")).unwrap();
+    let out = s.ab("ok", &["--yes"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert_eq!(
+        e.matches("note: couldn't record the run:").count(),
+        2,
+        "{e}"
+    );
+    assert!(
+        o.contains("| remember | 1/1 passed"),
+        "the report still shows it: {o}"
+    );
 }

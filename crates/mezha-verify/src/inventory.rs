@@ -436,3 +436,298 @@ fn stem(path: &Path) -> String {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::ctx::Platform;
+    use crate::layers::{Layer, Scope};
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn ctx(root: &Path, home: Option<&Path>, vars: &[(&str, &str)]) -> Ctx {
+        Ctx {
+            root: root.to_path_buf(),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            home: home.map(Path::to_path_buf),
+            platform: Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        }
+    }
+
+    fn plant(base: &Path, rel: &str, content: &[u8]) -> PathBuf {
+        let path = base.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn walked(base: &Path) -> Inventory {
+        let mut inv = Inventory::default();
+        inv.walk(base, ".claude", Source::Project, None, &BTreeMap::new());
+        inv
+    }
+
+    fn paths(inv: &Inventory) -> Vec<&str> {
+        inv.items.iter().map(|i| i.path.as_str()).collect()
+    }
+
+    #[test]
+    fn walk_outside_uses_the_config_dir_or_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let cfg = tmp.path().join("cfg");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        plant(&cfg, "agents/a.md", b"A.\n");
+        plant(&home, ".claude/agents/h.md", b"H.\n");
+        let cfg_text = format!("{}/", cfg.display());
+
+        // CLAUDE_CONFIG_DIR wins over home, shown without its trailing slash.
+        let mut inv = Inventory::default();
+        let c = ctx(&root, Some(&home), &[("CLAUDE_CONFIG_DIR", &cfg_text)]);
+        inv.walk_outside(&c, &Layers::default());
+        assert_eq!(paths(&inv), [format!("{}/agents/a.md", cfg.display())]);
+        assert_eq!(inv.items[0].source, Source::User);
+        assert!(inv.outside);
+
+        let mut inv = Inventory::default();
+        inv.walk_outside(&ctx(&root, Some(&home), &[]), &Layers::default());
+        assert_eq!(paths(&inv), ["~/.claude/agents/h.md"]);
+
+        // Without a home or a config dir there is nothing to walk.
+        let mut inv = Inventory::default();
+        inv.walk_outside(&ctx(&root, None, &[]), &Layers::default());
+        assert!(inv.outside && inv.items.is_empty(), "{:?}", inv.items);
+
+        // The project's own `.claude` as the config dir isn't walked twice.
+        let project = root.join(".claude").display().to_string();
+        plant(&root, ".claude/agents/p.md", b"P.\n");
+        let mut inv = Inventory::default();
+        let c = ctx(&root, Some(&home), &[("CLAUDE_CONFIG_DIR", &project)]);
+        inv.walk_outside(&c, &Layers::default());
+        assert!(inv.items.is_empty(), "{:?}", paths(&inv));
+    }
+
+    #[test]
+    fn plugins_are_found_by_record_or_in_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&home).unwrap();
+        let recorded = tmp.path().join("inst");
+        plant(&recorded, "skills/lint/SKILL.md", b"Lint.\n");
+        // One record as a plain object at the top level, one whose path is gone.
+        plant(
+            &plugins,
+            "installed_plugins.json",
+            json!({
+                "fmt@tools": { "installPath": recorded },
+                "plugins": { "old@tools": [{ "installPath": tmp.path().join("gone") }] }
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        plant(&plugins, "cache/tools/old/1.0.0/agents/x.md", b"Old.\n");
+        plant(&plugins, "cache/tools/old/2.0.0/agents/x.md", b"New.\n");
+        plant(&plugins, "cache/tools/old/notes.txt", b"not a version\n");
+        std::fs::create_dir_all(plugins.join("cache/tools/empty")).unwrap();
+        let layers = Layers {
+            layers: vec![Layer {
+                scope: Scope::User,
+                label: "user".into(),
+                value: json!({ "enabledPlugins": {
+                    "fmt@tools": true, "old@tools": true, "empty@tools": true,
+                    "nowhere@tools": true, "off@tools": false, "noat": true
+                } }),
+            }],
+            ..Layers::default()
+        };
+        let plugins_text = plugins.display().to_string();
+        let c = ctx(
+            &root,
+            Some(&home),
+            &[("CLAUDE_CODE_PLUGIN_CACHE_DIR", &plugins_text)],
+        );
+        let mut inv = Inventory::default();
+        inv.walk_outside(&c, &layers);
+        assert_eq!(
+            paths(&inv),
+            [
+                "plugin:fmt@tools/skills/lint/SKILL.md",
+                "plugin:old@tools/agents/x.md",
+            ]
+        );
+        assert_eq!(inv.items[0].plugin.as_deref(), Some("fmt@tools"));
+        assert_eq!(inv.items[1].sha256, Some(fingerprint("New.\n")));
+        assert_eq!(
+            inv.missing_plugins,
+            ["empty@tools", "noat", "nowhere@tools"]
+        );
+        assert_eq!(
+            plugin_dir(&plugins, "old@tools"),
+            Some(plugins.join("cache/tools/old/2.0.0"))
+        );
+    }
+
+    #[test]
+    fn the_walk_keeps_markdown_symlinks_and_skill_files_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".claude");
+        plant(&base, "agents/a.md", b"A.\n");
+        plant(&base, "agents/notes.txt", b"not loaded\n");
+        std::os::unix::fs::symlink("a.md", base.join("agents/link.md")).unwrap();
+        plant(&base, "skills/real/SKILL.md", b"Real.\n");
+        plant(&base, "skills/real/ref.txt", b"ref\n");
+        plant(&base, "skills/orphan/notes.md", b"no SKILL.md here\n");
+        plant(&base, "skills/stray.md", b"not a directory\n");
+        let elsewhere = tmp.path().join("elsewhere");
+        plant(&elsewhere, "SKILL.md", b"Linked.\n");
+        std::os::unix::fs::symlink(&elsewhere, base.join("skills/linked")).unwrap();
+
+        let inv = walked(&base);
+        let seen: Vec<(&str, ItemKind, &str, Coverage)> = inv
+            .items
+            .iter()
+            .map(|i| (i.path.as_str(), i.kind, i.name.as_str(), i.scan))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (".claude/agents/a.md", ItemKind::Agent, "a", Coverage::Pass),
+                (
+                    ".claude/agents/link.md",
+                    ItemKind::Agent,
+                    "link",
+                    Coverage::Incomplete
+                ),
+                (
+                    ".claude/skills/linked",
+                    ItemKind::SkillFile,
+                    "linked",
+                    Coverage::Incomplete
+                ),
+                (
+                    ".claude/skills/orphan/notes.md",
+                    ItemKind::SkillFile,
+                    "orphan",
+                    Coverage::Pass
+                ),
+                (
+                    ".claude/skills/real/SKILL.md",
+                    ItemKind::Skill,
+                    "real",
+                    Coverage::Pass
+                ),
+                (
+                    ".claude/skills/real/ref.txt",
+                    ItemKind::SkillFile,
+                    "real",
+                    Coverage::Pass
+                ),
+            ]
+        );
+        let link = &inv.items[1];
+        assert_eq!(link.findings, ["a symlink, not followed"]);
+        let expected = mezha_broker::sha256_hex(b"symlink:a.md");
+        assert_eq!(
+            link.sha256.as_deref(),
+            Some(format!("sha256:{expected}").as_str())
+        );
+        assert!(!inv.truncated);
+    }
+
+    #[test]
+    fn entries_that_cannot_be_looked_at_are_left_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".claude");
+        plant(&base, "rules/r.md", b"R.\n");
+        let rules = base.join("rules");
+        // Readable but not searchable: the names list, the entries don't.
+        std::fs::set_permissions(&rules, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let inv = walked(&base);
+        assert!(inv.items.is_empty(), "{:?}", paths(&inv));
+        assert!(!inv.truncated);
+        std::fs::set_permissions(&rules, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn the_walk_stops_at_depth_and_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".claude");
+        plant(&base, "agents/shallow.md", b"S.\n");
+        plant(&base, "agents/d1/d2/d3/d4/d5/d6/d7/d8/d9/deep.md", b"D.\n");
+        let inv = walked(&base);
+        assert_eq!(paths(&inv), [".claude/agents/shallow.md"]);
+        assert!(inv.truncated);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".claude");
+        std::fs::create_dir_all(base.join("rules")).unwrap();
+        for n in 0..=MAX_FILES {
+            std::fs::write(base.join(format!("rules/r{n:04}.md")), "").unwrap();
+        }
+        let inv = walked(&base);
+        assert_eq!(inv.items.len(), MAX_FILES);
+        assert!(inv.truncated);
+    }
+
+    #[test]
+    fn files_the_scan_cannot_read_are_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".claude");
+        let big = vec![b'x'; MAX_BYTES as usize + 1];
+        plant(&base, "rules/big.md", &big);
+        let locked = plant(&base, "rules/locked.md", b"secret\n");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(base.join("rules")).unwrap();
+        let fifo = base.join("rules/pipe.md");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo {}", fifo.display());
+
+        let inv = walked(&base);
+        let seen: Vec<(&str, Coverage, bool, String)> = inv
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.path.as_str(),
+                    i.scan,
+                    i.sha256.as_ref().is_some_and(|s| s.starts_with("sha256:")),
+                    i.findings.join("; "),
+                )
+            })
+            .collect();
+        let expected = [
+            (
+                ".claude/rules/big.md",
+                Coverage::Incomplete,
+                true,
+                "over 1 MiB, not scanned".to_string(),
+            ),
+            (
+                ".claude/rules/locked.md",
+                Coverage::Incomplete,
+                false,
+                "can't be read (Permission denied (os error 13))".to_string(),
+            ),
+            (
+                ".claude/rules/pipe.md",
+                Coverage::Incomplete,
+                false,
+                "not a regular file".to_string(),
+            ),
+        ];
+        assert_eq!(seen, expected);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}

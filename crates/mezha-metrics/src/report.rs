@@ -318,7 +318,11 @@ pub fn iso_week(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ab::Variant;
+    use crate::dreams::Outcome;
     use crate::sessions::RunRow;
+    use crate::skill_eval::{Arm, Kind};
+    use serde_json::json;
 
     #[test]
     fn iso_weeks() {
@@ -391,5 +395,279 @@ mod tests {
         let json: Value = serde_json::from_str(&r.to_json()).unwrap();
         assert_eq!(json["version"], 1);
         assert_eq!(json["sessions"], 2);
+    }
+
+    fn dream(stamp: &str, at: i64, scope: &str, outcome: Option<Outcome>) -> DreamRow {
+        DreamRow {
+            v: 1,
+            key: format!("{stamp}/implementer"),
+            stamp: stamp.into(),
+            role: "implementer".into(),
+            scope: scope.into(),
+            at,
+            runs: 2,
+            turns: 5,
+            cost_usd: 0.1,
+            commit: None,
+            dir: None,
+            patch_id: None,
+            branch: None,
+            applied: scope != "project",
+            outcome,
+        }
+    }
+
+    fn ab_row(stamp: &str, task: &str, variant: Variant, repeat: u32, passed: bool) -> AbRow {
+        AbRow {
+            v: 1,
+            id: format!("{stamp}/{task}/{}/{repeat}", variant.as_str()),
+            stamp: stamp.into(),
+            task: task.into(),
+            variant,
+            repeat,
+            passed,
+            is_error: false,
+            subtype: "success".into(),
+            cost_usd: 0.5,
+            turns: 4,
+            duration_ms: 1000,
+            claude_code: "2.1.285".into(),
+            failure: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval(
+        stamp: &str,
+        skill: &str,
+        kind: Kind,
+        case: &str,
+        arm: Arm,
+        repeat: u32,
+        should_trigger: Option<bool>,
+        loaded: bool,
+        passed: Option<bool>,
+    ) -> EvalRow {
+        EvalRow {
+            v: 1,
+            id: format!("{stamp}/{skill}/{case}/{}/{repeat}", arm.as_str()),
+            stamp: stamp.into(),
+            skill: skill.into(),
+            kind,
+            case: case.into(),
+            prompt_sha: "0".repeat(16),
+            arm,
+            repeat,
+            should_trigger,
+            loaded,
+            load_turn: loaded.then_some(1),
+            passed,
+            is_error: false,
+            subtype: "success".into(),
+            cost_usd: 0.25,
+            turns: 2,
+            duration_ms: 1000,
+            claude_code: "2.1.285".into(),
+            failure: None,
+            skill_sha: None,
+            model: None,
+            tools_used: Vec::new(),
+            undeclared_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reports_dreams_ab_runs_and_skill_evals() {
+        let day = parse_iso("2026-10-09").unwrap();
+        let since = day - 86_400;
+        let dreams = [
+            (
+                dream(
+                    "20261008T030000Z",
+                    day - 10,
+                    "project",
+                    Some(Outcome::WithoutEdits),
+                ),
+                None,
+            ),
+            (
+                dream("20261007T030000Z", day - 20, "project", None),
+                Some(Status::Dropped),
+            ),
+            (dream("20261006T030000Z", day - 30, "local", None), None),
+            // Before the window: left out, cost included.
+            (
+                dream(
+                    "20260901T030000Z",
+                    since - 1,
+                    "project",
+                    Some(Outcome::WithEdits),
+                ),
+                None,
+            ),
+        ];
+        let ab_rows = [
+            ab_row("20261001T000000Z", "a", Variant::Memory, 0, true),
+            ab_row("20261001T000000Z", "a", Variant::Empty, 0, false),
+            // An older A/B run is left out.
+            ab_row("20260901T000000Z", "b", Variant::Memory, 0, false),
+        ];
+        let x = "20261001T000000Z";
+        let y = "20261002T000000Z";
+        let z = "20261003T000000Z";
+        let mut eval_rows = vec![
+            // An older eval of the same skill is left out, whichever
+            // order the store lists them in.
+            eval(
+                "20260901T000000Z",
+                "x",
+                Kind::Trigger,
+                "trigger-1",
+                Arm::With,
+                0,
+                Some(true),
+                false,
+                None,
+            ),
+            eval(
+                x,
+                "x",
+                Kind::Trigger,
+                "trigger-1",
+                Arm::With,
+                0,
+                Some(true),
+                true,
+                None,
+            ),
+            eval(
+                y,
+                "y",
+                Kind::Task,
+                "t",
+                Arm::With,
+                0,
+                None,
+                true,
+                Some(true),
+            ),
+            eval(
+                y,
+                "y",
+                Kind::Task,
+                "t",
+                Arm::Without,
+                0,
+                None,
+                false,
+                Some(false),
+            ),
+        ];
+        for r in 0..3 {
+            eval_rows.push(eval(
+                z,
+                "z",
+                Kind::Trigger,
+                "trigger-1",
+                Arm::With,
+                r,
+                Some(false),
+                false,
+                None,
+            ));
+            eval_rows.push(eval(
+                z,
+                "z",
+                Kind::Task,
+                "t",
+                Arm::With,
+                r,
+                None,
+                true,
+                Some(true),
+            ));
+            eval_rows.push(eval(
+                z,
+                "z",
+                Kind::Task,
+                "t",
+                Arm::Without,
+                r,
+                None,
+                false,
+                Some(true),
+            ));
+        }
+        let last =
+            json!({"at": day, "ok": false, "scheduled": true, "error": "claude exited 1\u{1b}[2J"});
+        let r = build("p", since, &[], &dreams, &ab_rows, &eval_rows, Some(last));
+        assert_eq!(
+            r.dreams,
+            DreamTally {
+                without_edits: 1,
+                dropped: 1,
+                applied: 1,
+                ..DreamTally::default()
+            }
+        );
+        assert_eq!(r.share_without_edits, Some(1.0));
+        assert!(
+            (r.dream_cost_usd - 0.3).abs() < 1e-9,
+            "{}",
+            r.dream_cost_usd
+        );
+        let ab = r.ab.as_ref().unwrap();
+        assert_eq!(ab.stamp, "20261001T000000Z");
+        assert_eq!(ab.tasks.keys().collect::<Vec<_>>(), ["a"]);
+        let evals: Vec<(&str, &str)> = r
+            .skill_evals
+            .iter()
+            .map(|s| (s.skill.as_str(), s.stamp.as_str()))
+            .collect();
+        assert_eq!(evals, [("x", x), ("y", y), ("z", z)]);
+
+        let text = r.to_human();
+        for want in [
+            "Metrics for p since 2026-10-08: 0 session(s) (0 with a cost), 0 agent run(s)\n",
+            " sessions + $0.30 dreams; no session reported a cost (Claude Code's estimates)\n",
+            "Rework      - follow-up prompt(s) per session (proxy); re-runs after your prompt: none\n",
+            "Unresolved  no agent runs\n",
+            "Dreams      1 without edits, 0 with edits, 0 pending, 1 dropped, 0 stale; 1 local applied; 100% of merged ones without edits (as of your last fetch)\n",
+            "Last dream  2026-10-09T00:00:00Z, scheduled, FAILED: claude exited 1\\u{1b}[2J\n",
+            "A/B         20261001T000000Z, 1 task(s) × 1: with memory 1/1 passed, $0.50 · without 0/1, $0.50 (too few runs to claim a difference)\n",
+            "Skill eval  x, 20261001T000000Z: triggers precision 100%, recall 100%\n",
+            "Skill eval  y, 20261002T000000Z: tasks with the skill 1/1 passed, without 0/1 (too few runs to claim a difference)\n",
+            "Skill eval  z, 20261003T000000Z: triggers precision n/a, recall n/a · tasks with the skill 3/3 passed, without 3/3\n",
+        ] {
+            assert!(text.contains(want), "{want:?} is not in:\n{text}");
+        }
+        assert!(!text.contains("Roles"), "{text}");
+        let json: Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(json["ab"]["stamp"], "20261001T000000Z");
+        assert_eq!(json["skill_evals"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["last_dream"]["scheduled"], true);
+    }
+
+    #[test]
+    fn a_dream_run_by_hand_that_succeeded() {
+        let last = json!({"at": 1_800_000_000, "ok": true});
+        let r = build("p", 0, &[], &[], &[], &[], Some(last));
+        let text = r.to_human();
+        assert!(
+            text.contains("Last dream  2027-01-15T08:00:00Z, by hand, ok\n"),
+            "{text}"
+        );
+        assert!(!text.contains("\nA/B "), "{text}");
+        assert!(!text.contains("\nSkill eval "), "{text}");
+        assert_eq!(r.ab, None);
+        assert!(r.skill_evals.is_empty());
+    }
+
+    #[test]
+    fn token_counts_read_like_people_write_them() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(999), "999");
+        assert_eq!(human_count(1_500), "1.5k");
+        assert_eq!(human_count(2_500_000), "2.5M");
     }
 }

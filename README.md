@@ -632,6 +632,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
+Line coverage, with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)
+and the `llvm-tools-preview` component installed:
+
+```bash
+cargo llvm-cov --workspace --all-targets
+```
+
+The workspace sits at about 98% of lines, and the `coverage` job in CI
+fails under 95%. Measure in a plain terminal: a sandbox that refuses local
+listeners (Claude Code's, srt) fails the tests in
+`crates/mezha-verify/tests/boundary.rs` and `probe.rs`, and what only they
+exercise then shows as uncovered. The integration tests pass
+`LLVM_PROFILE_FILE` through to the `mezha` they run, so the binary's lines
+count.
+
 The end-to-end tests (`crates/mezha-cli/tests/e2e_hooks.rs`, Unix only) run
 the hook command from a generated `settings.json` verbatim under bash, with
 and without `mezha` on `PATH`. `crates/mezha-verify/tests/probe.rs` runs the

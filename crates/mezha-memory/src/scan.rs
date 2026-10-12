@@ -908,6 +908,17 @@ mod tests {
     }
 
     #[test]
+    fn redacts_overlapping_findings_as_one() {
+        // The assignment spans the token; the token inside it isn't
+        // redacted a second time.
+        let text = "token = ghp_0123456789abcdefghijklmnopqrstuvwxyzAB ok";
+        let (out, found) = redact(text, Scan::default());
+        assert_eq!(out, "[mezha: redacted assigned secret] ok");
+        let whats: Vec<&str> = found.iter().map(|f| f.what).collect();
+        assert_eq!(whats, ["assigned secret", "GitHub token"]);
+    }
+
+    #[test]
     fn escapes_for_terminals() {
         assert_eq!(escape("a\u{1b}[2Jb\u{202e}\n"), "a\\u{1b}[2Jb\\u{202e}\n");
     }

@@ -359,3 +359,115 @@ fn only_the_generated_shapes_count() {
         assert!(!is_generated(no), "{no}");
     }
 }
+
+#[test]
+fn an_empty_body_warns_and_an_unreadable_one_is_a_problem() {
+    let empty = scratch(Some(b"\n\n"));
+    let r = render_dir(empty.path());
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    assert_eq!(r.warnings, ["mezha/agents/a.md is empty"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = scratch(Some(b"Help.\n"));
+        let body = locked.path().join("mezha/agents/a.md");
+        fs::set_permissions(&body, fs::Permissions::from_mode(0o000)).unwrap();
+        let problems = problems(locked.path());
+        fs::set_permissions(&body, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            problems.starts_with(".claude/agents/a.md: mezha/agents/a.md: "),
+            "{problems}"
+        );
+        assert!(
+            problems.to_lowercase().contains("permission denied"),
+            "{problems}"
+        );
+    }
+}
+
+#[test]
+fn bodies_end_with_one_newline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spec = "[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push\"]\n\
+                [skill.ship]\npreset = \"command\"\ndescription = \"Ship it.\"\n\
+                [rule.always]\n";
+    fs::write(root.join("mezha.toml"), spec).unwrap();
+    fs::create_dir_all(root.join("mezha/skills")).unwrap();
+    fs::create_dir_all(root.join("mezha/rules")).unwrap();
+    fs::write(root.join("mezha/skills/ship.md"), "\n\nShip.").unwrap();
+    fs::write(root.join("mezha/rules/always.md"), "\nAnswer in English.").unwrap();
+    let r = render_dir(root);
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    let skill = &r.files[".claude/skills/ship/SKILL.md"];
+    assert!(skill.ends_with("---\n\nShip.\n"), "{skill}");
+    assert_eq!(r.files[".claude/rules/always.md"], "Answer in English.\n");
+}
+
+#[test]
+fn user_memory_lives_under_the_home_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spec = ONE_AGENT.replace(
+        "rule_of_two = []\n",
+        "rule_of_two = []\nmemory = { scope = \"user\" }\n",
+    );
+    fs::write(root.join("mezha.toml"), &spec).unwrap();
+    fs::create_dir_all(root.join("mezha/agents")).unwrap();
+    fs::write(root.join("mezha/agents/a.md"), "Help.\n").unwrap();
+    let r = render_dir(root);
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    let agent = &r.files[".claude/agents/a.md"];
+    assert_eq!(frontmatter(agent)["memory"].as_str(), Some("user"));
+    assert!(
+        agent.contains("Your memory in `~/.claude/agent-memory/a/` is read-only"),
+        "{agent}"
+    );
+    assert_eq!(
+        mezha_render::components::memory_dir("a", mezha_spec::Scope::User),
+        "~/.claude/agent-memory/a/"
+    );
+}
+
+/// Rendering doesn't validate: tools validation would have refused still
+/// render to something, and never to a scoped Bash hook.
+#[test]
+fn unscoped_or_unreadable_tools_get_no_bash_hook() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("mezha/agents")).unwrap();
+    for name in ["open", "broken", "bare"] {
+        fs::write(root.join(format!("mezha/agents/{name}.md")), "Help.\n").unwrap();
+    }
+    let text = "[project]\nname = \"p\"\n\
+        [agent.open]\ndescription = \"x\"\nrule_of_two = []\ntools = [\"Bash\", \"Bash(cargo test *)\"]\n\
+        [agent.broken]\ndescription = \"x\"\nrule_of_two = []\ntools = [\"Read\", \"Bash(cargo\"]\n\
+        [agent.bare]\ndescription = \"x\"\nrule_of_two = []\n";
+    let spec = mezha_spec::parse(text).unwrap();
+    let r = render(&spec, text, root).unwrap();
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    let open = frontmatter(&r.files[".claude/agents/open.md"]);
+    assert_eq!(strs(&open["tools"]), ["Bash"]);
+    assert!(
+        open["hooks"].is_badvalue(),
+        "an unscoped Bash entry means all of Bash: {:?}",
+        open["hooks"]
+    );
+    let broken = frontmatter(&r.files[".claude/agents/broken.md"]);
+    assert_eq!(strs(&broken["tools"]), ["Read"]);
+    assert!(broken["hooks"].is_badvalue(), "{:?}", broken["hooks"]);
+    let bare = frontmatter(&r.files[".claude/agents/bare.md"]);
+    assert!(bare["tools"].is_badvalue(), "{:?}", bare["tools"]);
+    assert!(bare["hooks"].is_badvalue(), "{:?}", bare["hooks"]);
+    // The golden implementer, by contrast, has only scoped Bash entries.
+    let golden = render_dir(&golden().join("full"));
+    let implementer = frontmatter(&golden.files[".claude/agents/implementer.md"]);
+    assert!(
+        implementer["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--allow 'cargo test *'"),
+        "{:?}",
+        implementer["hooks"]
+    );
+}

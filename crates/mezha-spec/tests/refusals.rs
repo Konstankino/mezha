@@ -553,3 +553,164 @@ fn fetch_allow() {
         ["policy.fetch_allow[0]", "policy.fetch_allow[1]"]
     );
 }
+
+#[test]
+fn diagnostics_print_their_place_and_hint() {
+    let d = check(&format!("{BASE}\n[agent.a]\n{AGENT}"));
+    let text = only_error(&d, "agent.a.rule_of_two").to_string();
+    assert!(
+        text.starts_with("error: agent.a.rule_of_two: is missing"),
+        "{text}"
+    );
+    assert!(text.contains("\n  hint: list any of"), "{text}");
+    let d = check("[project]\nname = \"p\"\n[policy]\nsandbox = false\n");
+    let w = d.warnings().find(|w| w.path == "policy.sandbox").unwrap();
+    let text = w.to_string();
+    assert!(
+        text.starts_with("warning: policy.sandbox: the sandbox is off"),
+        "{text}"
+    );
+    assert!(!text.contains("hint"), "{text}");
+}
+
+#[test]
+fn the_project_needs_a_plain_name() {
+    for bad in ["\"\"", "\"  \"", "\"a\\u0007b\""] {
+        let d = check(&format!(
+            "[project]\nname = {bad}\n[policy]\npermissions_ask = [\"git push\"]\nfetch_allow = []\n"
+        ));
+        let e = only_error(&d, "project.name");
+        assert!(e.message.contains("non-empty name"), "{bad}: {e:?}");
+    }
+}
+
+#[test]
+fn policy_strings_must_not_be_empty_or_spaced() {
+    let d = check(&BASE.replace(
+        "fetch_allow = []",
+        "fetch_allow = []\ndeny_reads = [\"\"]\negress_allow = [\"git hub.com\"]",
+    ));
+    let errors: Vec<_> = d.errors().collect();
+    assert_eq!(
+        paths(&d, Severity::Error),
+        ["policy.deny_reads[0]", "policy.egress_allow[0]"]
+    );
+    assert_eq!(errors[0].message, "must not be empty");
+    assert!(
+        errors[1].message.contains("contains whitespace"),
+        "{:?}",
+        errors[1]
+    );
+}
+
+#[test]
+fn listing_a_spec_skill_as_external_does_nothing() {
+    let d = check(&format!(
+        "{BASE}external_skills = [\"ship\"]\n[skill.ship]\npreset = \"command\"\ndescription = \"Ship it.\"\n"
+    ));
+    assert!(!d.has_errors(), "{:#?}", d.0);
+    assert_eq!(paths(&d, Severity::Warning), ["policy.external_skills[0]"]);
+    assert!(
+        d.0[0].message.contains("`ship` is defined in this spec"),
+        "{:?}",
+        d.0[0]
+    );
+}
+
+#[test]
+fn a_cron_without_the_cron_schedule_warns() {
+    let d = check(&format!("{BASE}\n[memory]\ndream_cron = \"0 3 * * *\"\n"));
+    assert!(!d.has_errors(), "{:#?}", d.0);
+    assert_eq!(paths(&d, Severity::Warning), ["memory.dream_cron"]);
+    assert!(
+        d.0[0].message.contains("dream_schedule = \"cron\""),
+        "{:?}",
+        d.0[0]
+    );
+}
+
+#[test]
+fn a_long_agent_description_warns() {
+    let long = "x".repeat(1025);
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"{long}\"\ntools = [\"Read\"]\nrule_of_two = []\n"
+    ));
+    assert!(!d.has_errors(), "{:#?}", d.0);
+    assert_eq!(paths(&d, Severity::Warning), ["agent.a.description"]);
+    assert!(
+        d.0[0].message.contains("is over 1024 characters"),
+        "{:?}",
+        d.0[0]
+    );
+}
+
+#[test]
+fn phi_memory_may_say_local_itself() {
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\nmemory = {{ class = \"phi\", scope = \"local\" }}\n"
+    ));
+    assert!(d.0.is_empty(), "{:#?}", d.0);
+}
+
+#[test]
+fn bash_scopes_must_parse() {
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\ndescription = \"x\"\ntools = [\"Bash(cargo\", \"Bash(cargo te*t)\"]\nrule_of_two = []\n"
+    ));
+    assert_eq!(
+        paths(&d, Severity::Error),
+        ["agent.a.tools", "agent.a.tools"]
+    );
+    let errors: Vec<_> = d.errors().collect();
+    assert_eq!(
+        errors[0].message, "`Bash(cargo` has an unclosed parenthesis",
+        "{:?}",
+        errors[0]
+    );
+    assert!(
+        errors[1]
+            .message
+            .starts_with("`Bash(cargo te*t)`: the scope `te*t`"),
+        "{:?}",
+        errors[1]
+    );
+    assert!(
+        errors[1].hint.as_deref().unwrap().contains("plain words"),
+        "{:?}",
+        errors[1]
+    );
+}
+
+#[test]
+fn unknown_disallowed_tools_warn() {
+    let d = check(&format!(
+        "{BASE}\n[agent.a]\n{AGENT}rule_of_two = []\ndisallowed_tools = [\"Telepathy\"]\n"
+    ));
+    assert!(!d.has_errors(), "{:#?}", d.0);
+    assert_eq!(paths(&d, Severity::Warning), ["agent.a.disallowed_tools"]);
+    assert!(
+        d.0[0]
+            .message
+            .contains("`Telepathy` is not a Claude Code tool"),
+        "{:?}",
+        d.0[0]
+    );
+}
+
+#[test]
+fn skill_names_descriptions_and_rule_limits_are_checked() {
+    let d = check(&format!(
+        "{BASE}\n[skill.Ship]\npreset = \"command\"\ndescription = \"Ship it.\"\n"
+    ));
+    only_error(&d, "skill.Ship");
+    let d = check(&format!(
+        "{BASE}\n[skill.ship]\npreset = \"command\"\ndescription = \" \"\n"
+    ));
+    let e = only_error(&d, "skill.ship.description");
+    assert_eq!(e.message, "must not be empty", "{e:?}");
+    let d = check(&format!(
+        "{BASE}\n[rule.r]\npaths = [\"x\"]\nmax_lines = 0\n"
+    ));
+    let e = only_error(&d, "rule.r.max_lines");
+    assert_eq!(e.message, "must be at least 1", "{e:?}");
+}

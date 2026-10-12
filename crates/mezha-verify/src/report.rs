@@ -339,6 +339,54 @@ mod tests {
     }
 
     #[test]
+    fn the_human_form_lists_checks_fixes_and_notes() {
+        let mut failed = Check::new("push-boundary", "an agent can't push", Kind::Boundary);
+        failed.status = Status::Fail;
+        failed.detail = "a token is reachable".into();
+        failed.fix = Some("remove it".into());
+        let mut report = Report {
+            version: JSON_VERSION,
+            mezha: "0",
+            hook_protocol: 1,
+            platform: "linux",
+            claude_code: Some("2.1.285".into()),
+            mode: "project-only",
+            probe: Some("srt 0.0.79".into()),
+            checks: vec![failed, Check::new("sandbox", "the sandbox", Kind::Boundary)],
+            summary: Summary::default(),
+            notes: vec!["first note".into(), "second note".into()],
+            verified_at: None,
+            inventory: Vec::new(),
+        };
+        report.summarize();
+        assert_eq!(report.exit_code(), 1);
+        let text = report.to_human("/w/repo");
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        assert_eq!(
+            lines,
+            [
+                "mezha verify: /w/repo (linux, Claude Code 2.1.285, project files only, probed in srt 0.0.79)",
+                "  FAIL  push-boundary  a token is reachable",
+                "                       fix: remove it",
+                "  PASS  sandbox",
+                "note: first note",
+                "note: second note",
+                "1 failed, 0 warning(s), 1 passed, 0 skipped.",
+            ],
+            "{text}"
+        );
+        // Inside the sandbox there is no Claude Code version to show.
+        report.mode = "inside";
+        let text = report.to_human("/w/repo");
+        assert!(
+            text.starts_with(
+                "mezha verify: /w/repo (linux, seen from inside the session, probed in"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn worst_status_wins() {
         let mut f = Findings::default();
         f.warn("a", None);

@@ -265,4 +265,17 @@ mod tests {
         let refs: Vec<&Value> = records.iter().collect();
         assert_eq!(tokens(&refs), (30, 370));
     }
+
+    #[test]
+    fn tokens_without_a_message_id_count_once_each() {
+        let anonymous = serde_json::json!({"type": "assistant", "message": {"usage": {"input_tokens": 7, "output_tokens": 1}}});
+        let records = [
+            anonymous.clone(),
+            anonymous,
+            serde_json::json!({"type": "assistant", "message": {"id": "m1", "content": "no usage"}}),
+            serde_json::json!({"type": "user", "message": {"usage": {"input_tokens": 100}}}),
+        ];
+        let refs: Vec<&Value> = records.iter().collect();
+        assert_eq!(tokens(&refs), (14, 2));
+    }
 }

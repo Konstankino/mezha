@@ -353,4 +353,103 @@ mod tests {
         let out = sh("echo \"[$HOME][$LC_ALL]\"", Duration::from_secs(5));
         assert_eq!(out.stdout, "[][C]\n");
     }
+
+    /// [`run_lines`] over a shell script, collecting the lines it saw.
+    fn sh_lines(
+        script: &str,
+        timeout: Duration,
+        mut on_line: impl FnMut(&str) -> Next,
+    ) -> (Vec<String>, Output) {
+        let mut seen = Vec::new();
+        let out = run_lines(
+            &ctx(),
+            &Run {
+                program: Path::new("/bin/sh"),
+                args: &["-c", script],
+                cwd: Path::new("/"),
+                env: &[],
+                remove: &[],
+                stdin: b"",
+                timeout,
+            },
+            |line| {
+                seen.push(line.to_string());
+                on_line(line)
+            },
+        )
+        .unwrap();
+        (seen, out)
+    }
+
+    #[test]
+    fn an_overlong_line_is_dropped_and_the_rest_still_arrive() {
+        let script = format!(
+            "head -c {} /dev/zero | tr '\\0' x; echo; echo after",
+            LINE_CAP + 1000
+        );
+        let (seen, out) = sh_lines(&script, Duration::from_secs(30), |_| Next::Continue);
+        assert_eq!(seen, ["after"]);
+        assert!(out.success() && !out.timed_out && !out.stopped, "{out:?}");
+    }
+
+    #[test]
+    fn a_child_that_closes_stdout_early_is_still_waited_for() {
+        let (seen, out) = sh_lines(
+            "echo a; exec 1>&-; sleep 0.3; exit 5",
+            Duration::from_secs(10),
+            |_| Next::Continue,
+        );
+        assert_eq!(seen, ["a"]);
+        assert_eq!(
+            (out.code, out.timed_out, out.stopped),
+            (Some(5), false, false),
+            "{out:?}"
+        );
+    }
+
+    /// Lines the child wrote just before exiting are still delivered, and
+    /// a stop among them is honoured. The first callback sleeps so the
+    /// child is gone before the rest are read.
+    #[test]
+    fn lines_queued_at_exit_are_delivered_and_can_stop() {
+        let (seen, out) = sh_lines("echo a; echo b; echo c", Duration::from_secs(10), |line| {
+            if line == "a" {
+                thread::sleep(Duration::from_millis(200));
+            }
+            Next::Continue
+        });
+        assert_eq!(seen, ["a", "b", "c"]);
+        assert_eq!((out.code, out.stopped), (Some(0), false), "{out:?}");
+
+        let (seen, out) = sh_lines(
+            "echo a; echo stop; echo late",
+            Duration::from_secs(10),
+            |line| {
+                if line == "a" {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                if line == "stop" {
+                    Next::Stop
+                } else {
+                    Next::Continue
+                }
+            },
+        );
+        assert_eq!(seen, ["a", "stop"]);
+        assert!(out.stopped, "{out:?}");
+    }
+
+    #[test]
+    fn run_lines_times_out_and_kills_the_group() {
+        let started = Instant::now();
+        let (seen, out) = sh_lines(
+            "echo first; sleep 30 & sleep 30",
+            Duration::from_millis(300),
+            |_| Next::Continue,
+        );
+        assert_eq!(seen, ["first"]);
+        assert!(out.timed_out && !out.stopped, "{out:?}");
+        assert_eq!(out.code, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }

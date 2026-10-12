@@ -330,4 +330,95 @@ mod tests {
         assert!(!text.contains("\"mask\""));
         assert!(!text.contains(".cache"), "allowWrite isn't passed on");
     }
+
+    fn ctx() -> Ctx {
+        Ctx {
+            root: PathBuf::from("/work/repo"),
+            vars: Default::default(),
+            home: Some(PathBuf::from("/home/u")),
+            platform: Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        }
+    }
+
+    fn user_layers(value: Value) -> Layers {
+        Layers {
+            layers: vec![Layer {
+                scope: Scope::User,
+                label: "user".into(),
+                value,
+            }],
+            ..Layers::default()
+        }
+    }
+
+    /// Entries srt can't use are left out: a disabled filesystem sandbox
+    /// drops the read and file denials, and an entry without a path or
+    /// name, or with a mode that is neither deny nor mask, is skipped.
+    #[test]
+    fn settings_leave_out_what_srt_cannot_use() {
+        let layers = user_layers(json!({
+            "sandbox": {
+                "filesystem": { "disabled": true, "denyRead": ["~/private"] },
+                "credentials": {
+                    "files": [
+                        { "path": "~/.netrc", "mode": "deny" },
+                        { "mode": "deny" },
+                        { "path": "~/.x", "mode": "allow" }
+                    ],
+                    "envVars": [
+                        { "name": "GH_TOKEN", "mode": "deny" },
+                        { "mode": "deny" },
+                        { "name": "X", "mode": "allow" }
+                    ]
+                }
+            }
+        }));
+        let (value, masked) = settings(&ctx(), &layers);
+        assert_eq!(value["filesystem"]["denyRead"], json!([]), "{value}");
+        assert_eq!(value["credentials"]["files"], json!([]), "{value}");
+        assert_eq!(
+            value["credentials"]["envVars"],
+            json!([{ "name": "GH_TOKEN", "mode": "deny" }]),
+            "{value}"
+        );
+        assert!(
+            masked.paths.is_empty() && masked.env.is_empty(),
+            "{masked:?}"
+        );
+    }
+
+    #[test]
+    fn command_settings_add_the_writable_paths() {
+        let layers = user_layers(json!({
+            "sandbox": {
+                "filesystem": {
+                    "allowWrite": ["~/.cache", "build", "//opt/out", "build"],
+                    "denyWrite": ["secrets"]
+                }
+            }
+        }));
+        let cwd = Path::new("/work/tree");
+        let value = command_settings(&ctx(), &layers, cwd);
+        let temp = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(
+            value["filesystem"]["allowWrite"],
+            json!([
+                "/work/tree",
+                temp,
+                "/home/u/.cache",
+                "/work/tree/build",
+                "/opt/out"
+            ]),
+            "{value}"
+        );
+        assert_eq!(
+            value["filesystem"]["denyWrite"],
+            json!(["/work/tree/secrets"]),
+            "{value}"
+        );
+        assert_eq!(value["network"]["allowedDomains"], json!([]), "{value}");
+    }
 }

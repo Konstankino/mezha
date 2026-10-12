@@ -278,6 +278,55 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_bases_list_both_kinds_of_insteadof() {
+        let c = cfg(&[
+            ("url.https://x:tok@github.com/.insteadof", "gh:"),
+            (
+                "url.ssh://push.example/.pushinsteadof",
+                "https://a.example/",
+            ),
+            ("url.https://other/.extra", "o:"),
+            ("remote.origin.url", "gh:o/r"),
+        ]);
+        assert_eq!(
+            c.rewrite_bases(),
+            ["https://x:tok@github.com/", "ssh://push.example/"]
+        );
+        assert_eq!(GitConfig::default().rewrite_bases(), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_git_config_is_an_error_with_its_message() {
+        use crate::ctx::Platform;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Ctx {
+            root: tmp.path().to_path_buf(),
+            vars: [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
+            home: None,
+            platform: Platform::detect(),
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+        // `--local` outside a repository is refused by git itself.
+        let err = GitConfig::read(&ctx, true).unwrap_err();
+        let ReadError::Failed(message) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(message.contains("--local"), "{message}");
+
+        let no_git = Ctx {
+            vars: [("PATH".to_string(), tmp.path().display().to_string())].into(),
+            ..ctx
+        };
+        assert!(matches!(
+            GitConfig::read(&no_git, false),
+            Err(ReadError::NoGit)
+        ));
+    }
+
+    #[test]
     fn extra_headers_count_after_resets() {
         assert_eq!(
             cfg(&[("http.extraheader", "AUTHORIZATION: x")]).extra_headers(),

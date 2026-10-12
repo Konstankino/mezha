@@ -299,3 +299,304 @@ fn credentials_are_withheld_from_the_sandbox_and_the_read_tool() {
     );
     assert_eq!(v["env"]["GIT_CONFIG_KEY_0"], "credential.helper");
 }
+
+#[test]
+fn an_empty_fetch_allow_turns_web_fetch_off() {
+    let env = |text: &str| {
+        let r = rendered_from(text);
+        let v: serde_json::Value = serde_json::from_str(&r.files[SETTINGS]).unwrap();
+        v["env"].clone()
+    };
+    let base = "[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push\"]\n";
+    let none = env(&format!("{base}fetch_allow = []\n"));
+    assert_eq!(none["CLAUDE_CODE_DISABLE_WEB_FETCH"], "1", "{none}");
+    let some = env(&format!("{base}fetch_allow = [\"docs.rs\"]\n"));
+    assert!(
+        some.get("CLAUDE_CODE_DISABLE_WEB_FETCH").is_none(),
+        "{some}"
+    );
+    let open = env(base);
+    assert!(
+        open.get("CLAUDE_CODE_DISABLE_WEB_FETCH").is_none(),
+        "{open}"
+    );
+}
+
+/// Rendering doesn't validate, so a spec validation would have refused
+/// still gets a named error rather than a half-rendered tree.
+#[test]
+fn invalid_gates_and_fetch_hosts_are_render_errors() {
+    use mezha_render::RenderError;
+    let fails = |text: &str| {
+        let spec = mezha_spec::parse(text).unwrap();
+        render(&spec, text, Path::new("/nonexistent")).unwrap_err()
+    };
+    let gates = fails("[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push; rm\"]\n");
+    assert!(matches!(gates, RenderError::Gates(_)), "{gates:?}");
+    assert!(
+        gates
+            .to_string()
+            .starts_with("policy.permissions_ask: `git push; rm` is not a command prefix"),
+        "{gates}"
+    );
+    let fetch = fails("[project]\nname = \"p\"\n[policy]\nfetch_allow = [\"https://docs.rs\"]\n");
+    assert!(matches!(fetch, RenderError::Fetch(_)), "{fetch:?}");
+    assert!(
+        fetch
+            .to_string()
+            .starts_with("policy.fetch_allow: `https://docs.rs` is not a host"),
+        "{fetch}"
+    );
+    let windows = RenderError::NativeWindows.to_string();
+    assert!(windows.contains("Use WSL2"), "{windows}");
+}
+
+#[test]
+fn write_errors_say_what_went_wrong_where() {
+    let newer = WriteError::NewerState(9).to_string();
+    assert_eq!(
+        newer,
+        format!(
+            "{STATE} has state_version 9, newer than this mezha reads ({}); upgrade mezha",
+            mezha_render::state::STATE_VERSION
+        )
+    );
+    assert_eq!(
+        WriteError::Conflicts.to_string(),
+        "conflicting files; nothing was written"
+    );
+    let io = WriteError::Io {
+        path: SETTINGS.into(),
+        error: std::io::Error::other("disk gone"),
+    };
+    assert_eq!(io.to_string(), ".claude/settings.json: disk gone");
+    let refused = WriteError::Refused {
+        path: SETTINGS.into(),
+        reason: "not a regular file".into(),
+    };
+    assert_eq!(
+        refused.to_string(),
+        "refusing to write .claude/settings.json: not a regular file"
+    );
+}
+
+#[test]
+fn an_unreadable_state_file_is_noted_and_files_count_as_hand_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let r = rendered();
+    write(root, &plan(root, &r).unwrap(), Mode::Compile, "s").unwrap();
+    fs::write(root.join(STATE), "not json\n").unwrap();
+    let r2 = rendered_from("[project]\nname = \"p\"\n[policy]\npermissions_ask = [\"git push\"]\n");
+    let p = plan(root, &r2).unwrap();
+    assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+    assert!(
+        p.notes[0].starts_with(".claude/.mezha-state.json is unreadable ("),
+        "{:?}",
+        p.notes
+    );
+    assert!(
+        matches!(&p.changes[0].action, Action::Conflict(why) if why.contains("not written by mezha")),
+        "{:?}",
+        p.changes[0].action
+    );
+    assert!(p.state_changed);
+}
+
+#[test]
+fn a_file_no_longer_generated_is_removed_only_when_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let r = rendered();
+    write(root, &plan(root, &r).unwrap(), Mode::Compile, "s").unwrap();
+    // The state remembers two rules mezha once wrote: one edited by hand
+    // since, one already gone.
+    fs::create_dir_all(root.join(".claude/rules")).unwrap();
+    fs::write(root.join(".claude/rules/edited.md"), "edited by hand\n").unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(STATE)).unwrap()).unwrap();
+    let print = |text: &str| serde_json::Value::from(mezha_render::state::fingerprint(text));
+    state["files"][".claude/rules/edited.md"] = print("as mezha wrote it\n");
+    state["files"][".claude/rules/gone.md"] = print("gone\n");
+    fs::write(root.join(STATE), state.to_string()).unwrap();
+
+    let p = plan(root, &r).unwrap();
+    let others: Vec<_> = p.changes.iter().filter(|c| c.path != SETTINGS).collect();
+    assert_eq!(others.len(), 1, "{p:#?}");
+    assert_eq!(others[0].path, ".claude/rules/edited.md");
+    assert!(
+        matches!(&others[0].action, Action::KeepRemoved(why) if why.contains("changed by hand")),
+        "{:?}",
+        others[0].action
+    );
+    assert!(others[0].new.is_none());
+    assert!(p.state_changed, "the state forgets both files");
+    assert!(!p.is_noop());
+
+    let report = write(root, &p, Mode::Apply, "s").unwrap();
+    assert!(report.written.is_empty(), "{report:?}");
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert!(report.backup.is_none(), "{report:?}");
+    assert_eq!(
+        fs::read_to_string(root.join(".claude/rules/edited.md")).unwrap(),
+        "edited by hand\n"
+    );
+    // Afterwards nothing is left to do, and writing that changes nothing.
+    let p = plan(root, &r).unwrap();
+    assert!(p.is_noop(), "{p:#?}");
+    let before = fs::read_to_string(root.join(STATE)).unwrap();
+    let report = write(root, &p, Mode::Compile, "s").unwrap();
+    assert!(report.written.is_empty(), "{report:?}");
+    assert_eq!(fs::read_to_string(root.join(STATE)).unwrap(), before);
+}
+
+/// Rendered output with arbitrary paths, for what the fence refuses.
+fn custom(files: &[(&str, &str)]) -> Rendered {
+    Rendered {
+        files: files
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect(),
+        spec: "sha256:test".into(),
+        problems: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn only_plain_relative_paths_to_regular_files_are_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for bad in ["", "../x", "/abs", "a\\b", "./x", "a/../b"] {
+        let err = plan(root, &custom(&[(bad, "x\n")])).unwrap_err();
+        assert!(
+            matches!(&err, WriteError::Refused { path, reason }
+                if path == bad && reason == "not a plain relative path"),
+            "{bad:?}: {err}"
+        );
+    }
+    // A directory where the file should be.
+    fs::create_dir_all(root.join(SETTINGS)).unwrap();
+    let err = plan(root, &rendered()).unwrap_err();
+    assert!(
+        matches!(&err, WriteError::Refused { reason, .. } if reason == "not a regular file"),
+        "{err}"
+    );
+    fs::remove_dir(root.join(SETTINGS)).unwrap();
+    fs::remove_dir(root.join(".claude")).unwrap();
+    // A file where a directory should be.
+    fs::write(root.join(".claude"), "").unwrap();
+    let err = plan(root, &rendered()).unwrap_err();
+    assert!(
+        matches!(&err, WriteError::Refused { reason, .. } if reason.ends_with(".claude is not a directory")),
+        "{err}"
+    );
+}
+
+#[test]
+fn backups_keep_paths_outside_dot_claude_as_they_are() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("notes.md"), "mine\n").unwrap();
+    let p = plan(root, &custom(&[("notes.md", "generated\n")])).unwrap();
+    assert!(
+        matches!(&p.changes[0].action, Action::Conflict(_)),
+        "{:?}",
+        p.changes[0].action
+    );
+    let report = write(root, &p, Mode::Apply, "20270101T000000Z").unwrap();
+    let backup = report.backup.unwrap();
+    assert_eq!(
+        fs::read_to_string(backup.join("notes.md")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("notes.md")).unwrap(),
+        "generated\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn io_errors_name_the_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let r = rendered();
+    let io_on =
+        |err: &WriteError, path: &str| matches!(err, WriteError::Io { path: p, .. } if p == path);
+
+    // An unreadable settings file can't be compared with the new one.
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(root.join(SETTINGS), "{}\n").unwrap();
+    mode(&root.join(SETTINGS), 0o000);
+    let err = plan(root, &r).unwrap_err();
+    mode(&root.join(SETTINGS), 0o644);
+    assert!(io_on(&err, SETTINGS), "{err}");
+    assert!(
+        err.to_string().starts_with(".claude/settings.json: "),
+        "{err}"
+    );
+    fs::remove_file(root.join(SETTINGS)).unwrap();
+
+    // A read-only .claude can't take the file, and no temporary file stays.
+    let p = plan(root, &r).unwrap();
+    mode(&root.join(".claude"), 0o500);
+    let err = write(root, &p, Mode::Compile, "s").unwrap_err();
+    mode(&root.join(".claude"), 0o755);
+    assert!(io_on(&err, SETTINGS), "{err}");
+    let left: Vec<_> = fs::read_dir(root.join(".claude"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    // A read-only root can't take .claude itself.
+    fs::remove_dir(root.join(".claude")).unwrap();
+    let p = plan(root, &r).unwrap();
+    mode(root, 0o500);
+    let err = write(root, &p, Mode::Compile, "s").unwrap_err();
+    mode(root, 0o755);
+    assert!(io_on(&err, SETTINGS), "{err}");
+    assert!(!root.join(".claude").exists());
+}
+
+#[test]
+fn diffs_are_unified_with_the_project_paths() {
+    use mezha_render::{Change, unified_diff};
+    let updated = Change {
+        path: ".claude/rules/x.md".into(),
+        action: Action::Update,
+        old: Some("a\r\nb\r\n".into()),
+        new: Some("a\nc\n".into()),
+    };
+    let diff = unified_diff(&updated);
+    assert!(
+        diff.starts_with("--- a/.claude/rules/x.md\n+++ b/.claude/rules/x.md\n"),
+        "{diff}"
+    );
+    assert!(diff.contains("\n a\n-b\n+c\n"), "{diff}");
+    let created = Change {
+        path: "x".into(),
+        action: Action::Create,
+        old: None,
+        new: Some("new\n".into()),
+    };
+    assert!(
+        unified_diff(&created).ends_with("@@\n+new\n"),
+        "{}",
+        unified_diff(&created)
+    );
+    let removed = Change {
+        path: "x".into(),
+        action: Action::Remove,
+        old: Some("old\n".into()),
+        new: None,
+    };
+    assert!(
+        unified_diff(&removed).ends_with("@@\n-old\n"),
+        "{}",
+        unified_diff(&removed)
+    );
+}

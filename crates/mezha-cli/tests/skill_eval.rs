@@ -56,15 +56,16 @@ expect = ["PERSIMMON"]
 "#;
 
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.285 (Claude Code)"; exit 0; fi
-mode=""; persist=1; settings=""; turns=""
+if [ "$1" = "--version" ]; then echo "${FAKE_VERSION:-2.1.285 (Claude Code)}"; exit 0; fi
+mode=""; persist=1; settings=""; turns=""; model=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --permission-mode) mode="$2"; shift ;;
     --no-session-persistence) persist=0 ;;
     --settings) settings="$2"; shift ;;
     --max-turns) turns="$2"; shift ;;
-    --output-format|--max-budget-usd|--permission-prompts|--model) shift ;;
+    --model) model="$2"; shift ;;
+    --output-format|--max-budget-usd|--permission-prompts) shift ;;
     -p|--verbose|--strict-mcp-config) ;;
     *) echo "unexpected argument: $1" >&2; exit 9 ;;
   esac
@@ -77,11 +78,17 @@ skill=.claude/skills/conventions/SKILL.md
 {
   pwd
   git log -1 --format=%s
-  echo "turns=$turns skill=$([ -f $skill ] && echo yes || echo no) body=$([ -f mezha/skills/conventions.md ] && echo yes || echo no) evals=$([ -e mezha/evals ] && echo yes || echo no) status=$(git status --porcelain | wc -l | tr -d ' ') remotes=$(git remote | wc -l | tr -d ' ') git=$([ -d "$(git rev-parse --show-toplevel)/.git" ] && echo dir || echo link)"
+  echo "turns=$turns model=$model skill=$([ -f $skill ] && echo yes || echo no) body=$([ -f mezha/skills/conventions.md ] && echo yes || echo no) evals=$([ -e mezha/evals ] && echo yes || echo no) status=$(git status --porcelain | wc -l | tr -d ' ') remotes=$(git remote | wc -l | tr -d ' ') git=$([ -d "$(git rev-parse --show-toplevel)/.git" ] && echo dir || echo link)"
 } >> "$FAKE_LOG"
 # As Claude Code does, even when the run may not write auto memory.
 mkdir -p "$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')/memory"
-printf '{"type":"system","subtype":"init","tools":["Bash","Edit","Read","Skill"],"mcp_servers":[],"permissionMode":"acceptEdits","skills":[],"claude_code_version":"2.1.285"}\n'
+version=2.1.285
+[ "$FAKE_MODE" = badinit ] && version=9.9.9
+printf '{"type":"system","subtype":"init","tools":["Bash","Edit","Read","Skill"],"mcp_servers":[],"permissionMode":"acceptEdits","skills":[],"claude_code_version":"%s"}\n' "$version"
+[ "$FAKE_MODE" = badinit ] && { sleep 30; exit 0; }
+if { [ "$FAKE_MODE" = triggerfail ] && [ "$turns" = 3 ]; } || { [ "$FAKE_MODE" = taskfail ] && [ "$turns" != 3 ]; }; then
+  printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01}\n'; exit 1
+fi
 printf '{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"text","text":"Looking."}]}}\n'
 loaded=no
 if [ -f $skill ] || [ "$FAKE_MODE" = collide ]; then
@@ -463,4 +470,192 @@ fn refusals() {
         .output()
         .unwrap();
     assert_eq!(stdout(&worktrees).lines().count(), 1);
+}
+
+#[test]
+fn only_one_kind_of_case_needs_cases_of_that_kind() {
+    let s = setup("");
+    let triggers = s.p.base.join("triggers.toml");
+    write(
+        &triggers,
+        "[[trigger]]\nprompt = \"LOAD\"\nshould_trigger = true\n\n[[trigger]]\nprompt = \"Hi\"\nshould_trigger = false\n",
+    );
+    let out = s.eval(
+        "ok",
+        &[
+            "conventions",
+            "--yes",
+            "--only",
+            "tasks",
+            "--cases",
+            triggers.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--only tasks, but there are no [[task]] entries"),
+        "{}",
+        stderr(&out)
+    );
+    let tasks = s.p.base.join("tasks.toml");
+    write(
+        &tasks,
+        "[eval]\nmodel = \"claude-test\"\n\n[[task]]\nname = \"free\"\nprompt = \"LOAD and do it.\"\n",
+    );
+    let out = s.eval(
+        "ok",
+        &[
+            "conventions",
+            "--yes",
+            "--only",
+            "triggers",
+            "--cases",
+            tasks.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--only triggers, but there are no [[trigger]] entries"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.log.exists(), "nothing ran");
+
+    // A task with neither a check nor patterns passes when the session
+    // does, in both arms; the model from the case file is passed on.
+    let out = s.eval(
+        "ok",
+        &["conventions", "--yes", "--cases", tasks.to_str().unwrap()],
+    );
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("free with the skill: passed"), "{o}");
+    assert!(o.contains("free without: passed"), "{o}");
+    let sessions = s.sessions();
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert!(
+        sessions.iter().all(|s| s.2.contains("model=claude-test")),
+        "{sessions:?}"
+    );
+}
+
+#[test]
+fn checks_can_run_unsandboxed_on_request() {
+    let s = setup("");
+    fs::remove_file(s.bin.join("srt")).unwrap();
+    let out = s.eval("ok", &["conventions", "--yes", "--only", "tasks"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("--unsandboxed-check"),
+        "{}",
+        stderr(&out)
+    );
+    let out = s.eval(
+        "ok",
+        &[
+            "conventions",
+            "--yes",
+            "--only",
+            "tasks",
+            "--unsandboxed-check",
+        ],
+    );
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(o.contains("check for codename (UNSANDBOXED)"), "{o}");
+    assert!(o.contains("codename with the skill: passed"), "{o}");
+    assert!(o.contains("codename without: failed"), "{o}");
+    assert!(!fs::read_to_string(&s.log).unwrap().contains("srt"));
+}
+
+#[test]
+fn a_skill_whose_body_cannot_be_rendered_is_refused() {
+    let s = setup("");
+    fs::remove_file(s.dir.join("mezha/skills/conventions.md")).unwrap();
+    let out = s.eval("ok", &["conventions", "--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out)
+            .contains("can't render skill.conventions: .claude/skills/conventions/SKILL.md:"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.log.exists(), "nothing ran");
+}
+
+#[test]
+fn a_session_that_starts_wrong_stops_the_eval() {
+    let s = setup("");
+    let out = s.eval("badinit", &["conventions", "--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(
+            "The skill eval stopped: Claude Code changed from 2.1.285 to 9.9.9 during the run; start again"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(s.sessions().len(), 1, "it stopped at the first session");
+    assert!(s.store_rows().is_empty(), "{:?}", s.store_rows());
+    let projects = s.p.home.join(".claude/projects");
+    assert_eq!(
+        fs::read_dir(&projects).unwrap().count(),
+        0,
+        "left in {projects:?}"
+    );
+}
+
+#[test]
+fn a_trigger_run_that_fails_does_not_count() {
+    let s = setup("");
+    let out = s.eval(
+        "triggerfail",
+        &["conventions", "--yes", "--only", "triggers"],
+    );
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert_eq!(
+        o.matches("$0.01, 1 turns (didn't count: it ended with error_during_execution)")
+            .count(),
+        3,
+        "{o}"
+    );
+    let rows = s.store_rows();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|r| r["is_error"] == true), "{rows:?}");
+}
+
+#[test]
+fn a_run_that_cannot_be_recorded_is_a_note() {
+    let s = setup("");
+    let store = mezha_memory::metrics_dir(&s.p.home, &s.dir);
+    // A directory where the store's file should be: nothing can be written.
+    fs::create_dir_all(store.join("skill-evals.jsonl")).unwrap();
+    let out = s.eval("ok", &["conventions", "--yes", "--only", "tasks"]);
+    let (o, e) = (stdout(&out), stderr(&out));
+    assert!(out.status.success(), "{o}\n{e}");
+    assert_eq!(
+        e.matches("note: couldn't record the run:").count(),
+        2,
+        "{e}"
+    );
+    assert!(o.contains("codename with the skill: passed"), "{o}");
+}
+
+#[test]
+fn a_task_run_that_fails_says_why() {
+    let s = setup("");
+    let out = s.eval("taskfail", &["conventions", "--yes", "--only", "tasks"]);
+    let o = stdout(&out);
+    assert!(out.status.success(), "{o}\n{}", stderr(&out));
+    assert!(
+        o.contains("codename with the skill: failed, not loaded, $0.01, 1 turns (it ended with error_during_execution)"),
+        "{o}"
+    );
+    assert!(
+        o.contains(
+            "codename without: failed, $0.01, 1 turns (it ended with error_during_execution)"
+        ),
+        "{o}"
+    );
 }

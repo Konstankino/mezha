@@ -89,4 +89,48 @@ mod tests {
         let home = base.join("home");
         assert_eq!(dreams_dir(&home, &wt), dreams_dir(&home, &main));
     }
+
+    #[test]
+    fn metrics_sit_next_to_dreams_under_the_same_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let home = base.join("home");
+        let metrics = metrics_dir(&home, &root);
+        let dreams = dreams_dir(&home, &root);
+        let key = dreams.file_name().unwrap();
+        assert_eq!(
+            metrics.strip_prefix(&home).unwrap(),
+            Path::new(".mezha/metrics").join(key),
+            "{}",
+            metrics.display()
+        );
+        assert_eq!(
+            dreams.strip_prefix(&home).unwrap(),
+            Path::new(".mezha/dreams").join(key),
+            "{}",
+            dreams.display()
+        );
+    }
+
+    #[test]
+    fn private_files_replace_their_predecessor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cursor.json");
+        write_private(&path, b"one").unwrap();
+        write_private(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        let names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["cursor.json"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{mode:o}");
+        }
+    }
 }

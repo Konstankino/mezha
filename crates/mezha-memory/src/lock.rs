@@ -90,6 +90,30 @@ mod tests {
     }
 
     #[test]
+    fn errors_say_who_holds_the_lock() {
+        assert_eq!(LockError::Busy(String::new()).to_string(), "it is held");
+        assert_eq!(
+            LockError::Busy("pid 7 since 03:00".into()).to_string(),
+            "it is held (pid 7 since 03:00)"
+        );
+        let io = LockError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "no access"));
+        assert_eq!(io.to_string(), "no access");
+    }
+
+    #[test]
+    fn a_lock_file_that_cannot_be_opened_is_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/dir.lock");
+        let err = try_lock(&path, "me").unwrap_err();
+        assert!(
+            matches!(&err, LockError::Io(e) if e.kind() == io::ErrorKind::NotFound),
+            "{err}"
+        );
+        let err = lock(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
     fn a_dead_holder_frees_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dream.lock");

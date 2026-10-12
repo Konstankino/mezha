@@ -364,4 +364,16 @@ mod tests {
             assert_eq!(re.is_match(path), matches, "{pattern}");
         }
     }
+
+    #[test]
+    fn empty_patterns_and_single_character_wildcards() {
+        assert!(owner_pattern("/").is_none());
+        assert!(owner_pattern("").is_none());
+        let re = owner_pattern("/.claude/agent-memory/implemente?/").unwrap();
+        assert!(re.is_match(".claude/agent-memory/implementer/MEMORY.md"));
+        assert!(!re.is_match(".claude/agent-memory/implementers/MEMORY.md"));
+        let re = owner_pattern("**/MEMORY.md").unwrap();
+        assert!(re.is_match(".claude/agent-memory/implementer/MEMORY.md"));
+        assert!(!re.is_match(".claude/agent-memory/implementer/notes.md"));
+    }
 }

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use mezha_hooks::{Env, PROTOCOL, dream_guard_command, run};
+use mezha_hooks::{Env, Outcome, PROTOCOL, dream_guard_command, run};
 use serde_json::{Value, json};
 
 struct Fixture {
@@ -35,8 +35,8 @@ impl Fixture {
         }
     }
 
-    fn check(&self, tool: &str, input: Value) -> bool {
-        let argv: Vec<String> = [
+    fn argv(&self) -> Vec<String> {
+        [
             "dream-guard",
             "--protocol",
             &PROTOCOL.to_string(),
@@ -47,15 +47,23 @@ impl Fixture {
         ]
         .iter()
         .map(|s| s.to_string())
-        .collect();
+        .collect()
+    }
+
+    fn fire(&self, event: &Value) -> Outcome {
+        let out = run(&self.argv(), event.to_string().as_bytes(), &Env::default());
+        assert!(out.code == 0 || out.code == 2, "{out:?}");
+        out
+    }
+
+    fn check(&self, tool: &str, input: Value) -> bool {
         let event = json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
             "tool_input": input,
             "cwd": self.wt,
         });
-        let out = run(&argv, event.to_string().as_bytes(), &Env::default());
-        assert!(out.code == 0 || out.code == 2, "{out:?}");
+        let out = self.fire(&event);
         if out.code == 2 {
             assert!(
                 out.stderr.contains("advisory") || out.stderr.contains("mezha"),
@@ -191,4 +199,106 @@ fn command_quotes_paths() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn without_a_cwd_relative_paths_cannot_be_placed() {
+    let f = Fixture::new();
+    let fire = |tool: &str, input: Value| {
+        f.fire(&json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": input,
+        }))
+    };
+    let out = fire("Read", json!({"file_path": "src/lib.rs"}));
+    assert!(out.is_block(), "{out:?}");
+    assert!(
+        out.stderr
+            .contains("`src/lib.rs` is relative and the event has no cwd"),
+        "{out:?}"
+    );
+    let out = fire("Grep", json!({"pattern": "x"}));
+    assert!(out.is_block(), "{out:?}");
+    assert!(
+        out.stderr.contains("Grep without a path or a cwd"),
+        "{out:?}"
+    );
+    // Absolute paths need no cwd.
+    assert_eq!(
+        fire("Read", json!({"file_path": f.wt.join("src/lib.rs")})),
+        Outcome::allow()
+    );
+    assert_eq!(
+        fire("Glob", json!({"pattern": "*.rs", "path": f.wt})),
+        Outcome::allow()
+    );
+}
+
+#[test]
+fn input_it_cannot_read_blocks() {
+    let f = Fixture::new();
+    let huge = vec![b' '; mezha_hooks::MAX_INPUT + 1];
+    let out = run(&f.argv(), &huge, &Env::default());
+    assert!(out.is_block(), "{out:?}");
+    assert!(out.stderr.contains("too large"), "{out:?}");
+    let out = run(&f.argv(), b"\xff\xfe", &Env::default());
+    assert!(out.is_block(), "{out:?}");
+    assert!(out.stderr.contains("not UTF-8"), "{out:?}");
+}
+
+#[test]
+fn command_refuses_paths_it_cannot_quote() {
+    use std::path::Path;
+    let line_break =
+        dream_guard_command(Path::new("/bin/me\nzha"), &[], Path::new("/w")).unwrap_err();
+    assert_eq!(line_break, "/bin/me\\nzha contains a line break");
+    let read = dream_guard_command(
+        Path::new("/bin/mezha"),
+        &[Path::new("/a\rb")],
+        Path::new("/w"),
+    )
+    .unwrap_err();
+    assert_eq!(read, "/a\\rb contains a line break");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(std::ffi::OsStr::from_bytes(b"/w/\xff"));
+        let err = dream_guard_command(Path::new("/bin/mezha"), &[], odd).unwrap_err();
+        assert_eq!(err, "/w/\u{fffd} is not valid UTF-8");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_symlinks_resolve_from_their_own_directory() {
+    let f = Fixture::new();
+    // staged/implementer/rel -> ../../outside, written relative to the link.
+    std::os::unix::fs::symlink("../../outside", f.staged.join("rel")).unwrap();
+    let rel = |name: &str| {
+        f.staged
+            .join("rel")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(!f.check("Write", json!({"file_path": rel("x.md")})));
+    assert!(!f.check("Read", json!({"file_path": rel("x.md")})));
+    std::fs::write(f.outside.join("seen.md"), "x").unwrap();
+    assert!(!f.check("Read", json!({"file_path": rel("seen.md")})));
+}
+
+#[test]
+fn memory_file_names_are_plain() {
+    let f = Fixture::new();
+    let staged = |name: &str| f.staged.join(name).to_string_lossy().into_owned();
+    for ok in ["MEMORY.md", "db-migrations.md", "v2_notes.md", "a.b.md"] {
+        assert!(f.check("Write", json!({"file_path": staged(ok)})), "{ok}");
+    }
+    for bad in [".md", "a b.md", "notes.MD", "x.md.bak", "ü.md"] {
+        assert!(
+            !f.check("Write", json!({"file_path": staged(bad)})),
+            "{bad}"
+        );
+    }
 }
