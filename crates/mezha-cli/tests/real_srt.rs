@@ -186,15 +186,20 @@ fn srt_refuses_ssh_through_socat() {
 }
 
 /// What ssh says inside srt when it reaches github.com, for a failure
-/// message: the probe's report carries only its verdict. Proxy
-/// credentials in `GIT_SSH_COMMAND` are masked.
+/// message: the probe's report carries only its verdict. Then the same
+/// with socat logging at notice level, and the proxy's own answer to
+/// `CONNECT github.com:22`. Proxy credentials are masked.
 #[cfg(target_os = "linux")]
 fn ssh_inside_srt(p: &Project) -> String {
     const SCRIPT: &str = r#"printf 'GIT_SSH_COMMAND=%s\n' "${GIT_SSH_COMMAND-(unset)}" | sed "s/proxyauth=[^,' ]*/proxyauth=***/g"
-env | sed -n 's/^\([A-Za-z_]*[Pp][Rr][Oo][Xx][Yy][A-Za-z_]*\)=.*/\1 is set/p'
 socat -V 2>&1 | sed -n 2p
 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=10" git ls-remote git@github.com:anthropics/sandbox-runtime.git 2>&1
-echo "exit $?""#;
+echo "exit $?"
+echo "--- socat at notice level"
+loud=$(printf '%s' "${GIT_SSH_COMMAND:-ssh}" | sed 's/socat -/socat -d -d -/')
+GIT_SSH_COMMAND="$loud -o BatchMode=yes -o ConnectTimeout=10" git ls-remote git@github.com:anthropics/sandbox-runtime.git 2>&1 | sed "s/proxyauth=[^,' ]*/proxyauth=***/g; s/\(Proxy-Authorization:\).*/\1 ***/I"
+echo "--- the proxy's answer to CONNECT github.com:22"
+curl -sv -p -x "$HTTPS_PROXY" --max-time 10 telnet://github.com:22 </dev/null 2>&1 | grep -E '^(< |\* CONNECT|\* Recv|curl: )'"#;
     // srt points TMPDIR at /tmp/claude but doesn't create it.
     fs::create_dir_all("/tmp/claude").unwrap();
     let settings = p.base.join("srt-ssh-settings.json");
