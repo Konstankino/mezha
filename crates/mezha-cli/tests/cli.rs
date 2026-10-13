@@ -84,6 +84,16 @@ fn every_command_stops_on_an_invalid_spec() {
         let out = p.mezha(&args);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stdout(&out));
         let err = stderr(&out);
+        // Native Windows refuses the A/B runs, skill evals and dreams
+        // before it reads the spec.
+        let not_on_windows = args.contains(&"--ab") || matches!(args[0], "dream" | "skill");
+        if cfg!(windows) && not_on_windows {
+            assert!(
+                err.contains("runs on macOS, Linux and WSL2"),
+                "{args:?}: {err}"
+            );
+            continue;
+        }
         assert!(
             err.contains("error: agent.a.rule_of_two"),
             "{args:?}: {err}"

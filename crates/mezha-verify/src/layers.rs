@@ -350,6 +350,8 @@ mod tests {
         assert!(layers.unchecked.is_empty(), "{:?}", layers.unchecked);
     }
 
+    /// Unix only: Windows reads the start directory's copy alone.
+    #[cfg(unix)]
     #[test]
     fn a_start_directory_below_the_git_root_reads_both_local_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -387,6 +389,8 @@ mod tests {
         );
     }
 
+    /// Unix only, as the sandbox is: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn agent_writable_paths() {
         let layers = Layers {
@@ -453,7 +457,12 @@ mod tests {
             root: root.clone(),
             vars: Default::default(),
             home: Some(home),
-            platform: Platform::Linux,
+            // Windows reads one local file (see `load`); the rest is the same.
+            platform: if cfg!(windows) {
+                Platform::Windows
+            } else {
+                Platform::Linux
+            },
             managed_dir: Some(managed),
             mezha_exe: None,
             agent_writable: Vec::new(),

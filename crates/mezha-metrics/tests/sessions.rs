@@ -119,7 +119,9 @@ fn subagents_without_times_or_that_cannot_be_read_are_left_out() {
     }
 
     let roles = BTreeSet::from(["implementer".to_string()]);
-    let row = extract(&file, std::slice::from_ref(&cwd), &roles).unwrap();
+    // Roots with forward slashes, as `project_sources` gives them.
+    let roots = [cwd.replace('\\', "/")];
+    let row = extract(&file, &roots, &roles).unwrap();
     let runs: Vec<(&str, u64, u64, u32)> = row
         .runs
         .iter()

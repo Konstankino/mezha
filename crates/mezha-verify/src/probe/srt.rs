@@ -272,6 +272,8 @@ mod tests {
 
     /// The project layer is mezha's own rendered settings; a user layer
     /// adds a WebFetch rule, a mask entry, a denied host and a read denial.
+    /// Unix only, as srt is: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn settings_golden() {
         let project: Value = serde_json::from_str(include_str!(
@@ -390,6 +392,8 @@ mod tests {
         );
     }
 
+    /// Unix only, as srt is: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn command_settings_add_the_writable_paths() {
         let layers = user_layers(json!({

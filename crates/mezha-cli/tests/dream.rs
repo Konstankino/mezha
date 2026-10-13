@@ -1222,8 +1222,14 @@ fn metrics_count_sessions_in_worktrees_but_not_in_ab_runs() {
     let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
     assert_eq!(json["sessions"], 2, "{json}");
 
-    // Without a trusted git, only the project itself is read.
-    let report = s.p.mezha_env(&["metrics", "--json"], &[("PATH", "/bin")]);
+    // Without a trusted git, only the project itself is read. PATH names
+    // an empty directory: /bin has git where it is /usr/bin (Ubuntu).
+    let no_git = s.p.base.join("no-git");
+    fs::create_dir_all(&no_git).unwrap();
+    let report = s.p.mezha_env(
+        &["metrics", "--json"],
+        &[("PATH", no_git.to_str().unwrap())],
+    );
     assert!(report.status.success(), "{}", stderr(&report));
     let json: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
     assert_eq!(json["sessions"], 1, "{json}");

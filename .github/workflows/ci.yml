@@ -59,15 +59,18 @@ jobs:
           distribution: Ubuntu-24.04
           wsl-version: 2
           additional-packages: build-essential curl git ca-certificates
+      # WSL starts as root, which ignores file permissions: the tests that
+      # make a file unreadable or a directory unwritable need a plain user.
+      - name: Add a user
+        run: useradd --create-home --shell /bin/bash tester
       - name: Install Rust
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+        run: |
+          su - tester -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
       - name: Test
         run: |
-          . "$HOME/.cargo/env"
-          cp -r . "$HOME/mezha"
-          cd "$HOME/mezha"
-          export CARGO_TARGET_DIR="$HOME/target"
-          cargo test --workspace --all-targets --locked --no-fail-fast
+          cp -r . /home/tester/mezha
+          chown -R tester: /home/tester/mezha
+          su - tester -c '. "$HOME/.cargo/env" && cd "$HOME/mezha" && CARGO_TARGET_DIR="$HOME/target" cargo test --workspace --all-targets --locked --no-fail-fast'
 
   # Line coverage of the workspace, measured where every test runs (the
   # listener tests in mezha-verify need to bind a local port). The floor

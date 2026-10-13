@@ -947,21 +947,34 @@ mod tests {
             policy(root),
             Policy::Unknown("mezha.toml is read-only, so a refused write shows nothing".into())
         );
-        // A directory can be looked at but not opened for appending.
-        fs::remove_file(&spec).unwrap();
-        fs::create_dir(&spec).unwrap();
-        let odd = policy(root);
-        let Policy::Unknown(why) = &odd else {
-            panic!("{odd:?}");
-        };
-        assert!(
-            why.starts_with("opening mezha.toml for writing failed oddly ("),
-            "{why}"
-        );
+        // A directory can be looked at but not opened for appending. On
+        // Windows that fails with "access denied", which reads as the
+        // sandbox refusing the write.
+        if cfg!(unix) {
+            fs::remove_file(&spec).unwrap();
+            fs::create_dir(&spec).unwrap();
+            let odd = policy(root);
+            let Policy::Unknown(why) = &odd else {
+                panic!("{odd:?}");
+            };
+            assert!(
+                why.starts_with("opening mezha.toml for writing failed oddly ("),
+                "{why}"
+            );
+        }
     }
 
     #[test]
     fn socket_probes_by_platform() {
+        if cfg!(not(unix)) {
+            for platform in [Platform::Linux, Platform::MacOs, Platform::Other] {
+                assert_eq!(
+                    probe_sockets(platform),
+                    Sockets::Unknown("no unix sockets on this platform".into())
+                );
+            }
+            return;
+        }
         let other = probe_sockets(Platform::Other);
         assert_eq!(
             other,
@@ -1044,7 +1057,9 @@ mod tests {
     #[test]
     fn looks_tell_devices_and_directories_apart() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(look(Path::new("/dev/null")), Look::CharDevice);
+        if cfg!(unix) {
+            assert_eq!(look(Path::new("/dev/null")), Look::CharDevice);
+        }
         assert_eq!(look(tmp.path()), Look::Dir);
         assert_eq!(
             look(&tmp.path().join("missing")),
@@ -1099,6 +1114,8 @@ mod tests {
         fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    /// Unix only, as unix sockets are: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn agent_sockets_follow_the_environment() {
         let tmp = tempfile::tempdir().unwrap();

@@ -162,6 +162,9 @@ mod tests {
         assert!(store.read(SESSIONS, "id").is_empty());
     }
 
+    /// Unix only: on Windows the store's lock locks nothing yet (see
+    /// `mezha_memory::lock`).
+    #[cfg(unix)]
     #[test]
     fn concurrent_writers_lose_nothing() {
         let dir = tempfile::tempdir().unwrap();

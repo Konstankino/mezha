@@ -75,7 +75,13 @@ mod tests {
     #[test]
     fn worktrees_share_a_key() {
         let tmp = tempfile::tempdir().unwrap();
+        // The key comes from `mezha_broker::repo_root`, which drops the
+        // `\\?\` that `canonicalize` puts in front on Windows.
         let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = match base.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+            Some(plain) => PathBuf::from(plain),
+            None => base,
+        };
         let main = base.join("main");
         let gitdir = main.join(".git/worktrees/wt");
         std::fs::create_dir_all(&gitdir).unwrap();

@@ -157,11 +157,15 @@ mod tests {
             }]
         });
         let (errors, warnings) = findings(&report.to_string(), &root);
+        // The path is shown with the platform's separators.
+        let slashed = |list: Vec<String>| -> Vec<String> {
+            list.iter().map(|s| s.replace('\\', "/")).collect()
+        };
         assert_eq!(
-            errors,
+            slashed(errors),
             [".claude/agents/bad.md: YAML frontmatter failed to parse"]
         );
-        assert_eq!(warnings, [".claude/agents/bad.md: No description"]);
+        assert_eq!(slashed(warnings), [".claude/agents/bad.md: No description"]);
         assert_eq!(findings("not json", &root), (Vec::new(), Vec::new()));
     }
 }

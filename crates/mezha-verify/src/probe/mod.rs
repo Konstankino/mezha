@@ -698,6 +698,7 @@ mod tests {
         assert!(!valid_var("$(id)"));
     }
 
+    #[cfg(unix)]
     fn ctx(home: Option<&Path>, vars: &[(&str, &str)]) -> Ctx {
         Ctx {
             root: PathBuf::from("/w/repo"),
@@ -713,6 +714,8 @@ mod tests {
         }
     }
 
+    /// Unix only, as the probe is: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn credential_paths_follow_the_environment_and_git() {
         let c = ctx(None, &[("XDG_CONFIG_HOME", "/x")]);

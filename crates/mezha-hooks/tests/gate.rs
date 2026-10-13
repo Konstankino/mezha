@@ -8,6 +8,17 @@ use serde_json::{Value, json};
 
 const NOW: u64 = 1_800_000_000;
 
+/// `path` made canonical in the form mezha keys projects by: without the
+/// `\\?\` that `canonicalize` puts in front on Windows (see
+/// `mezha_broker::repo_root`), so approvals and audit records are found.
+fn canonical(path: &Path) -> PathBuf {
+    let path = std::fs::canonicalize(path).unwrap();
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => path,
+    }
+}
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     home: PathBuf,
@@ -17,7 +28,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = canonical(tmp.path());
         let home = base.join("home");
         let repo = base.join("repo");
         std::fs::create_dir_all(&home).unwrap();

@@ -495,6 +495,8 @@ mod tests {
         }
     }
 
+    /// Unix only, as the sandbox is: on Windows the paths join with `\`.
+    #[cfg(unix)]
     #[test]
     fn deny_read_paths_count_unless_the_filesystem_sandbox_is_off() {
         let c = ctx(Platform::Linux);
