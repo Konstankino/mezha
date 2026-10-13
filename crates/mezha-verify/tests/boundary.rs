@@ -802,8 +802,12 @@ fn serve(answer: fn(&str) -> String) -> (u16, std::sync::mpsc::Receiver<String>)
                 }
                 head.push_str(&line);
             }
-            let _ = stream.write_all(answer(&head).as_bytes());
+            // Recorded before the answer goes out: a test reads the heads
+            // without waiting once its client has the answer, and a slow
+            // run (coverage) would otherwise miss the last one.
+            let reply = answer(&head);
             let _ = tx.send(head);
+            let _ = stream.write_all(reply.as_bytes());
         }
     });
     (port, rx)
