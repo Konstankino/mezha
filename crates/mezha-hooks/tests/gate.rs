@@ -164,7 +164,7 @@ fn no_tool_may_touch_the_store() {
         json!({ "file_path": "~/.mezha/approvals/x.json" }),
         json!({ "notebook_path": f.home.join(".mezha") }),
         json!({ "path": f.home.join("a/../.mezha/approvals") }),
-        json!({ "file_path": format!("../home/.mezha/approvals/x.json") }),
+        json!({ "file_path": "../home/.mezha/approvals/x.json" }),
     ] {
         for name in ["Edit", "Write", "NotebookEdit", "Grep"] {
             let out = f.fire(tool(name, input.clone()));
