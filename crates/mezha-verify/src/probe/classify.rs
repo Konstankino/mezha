@@ -11,6 +11,12 @@ use crate::hosts::Scheme;
 
 pub const EXIT_MARKER: &str = "MEZHA_PROBE_EXIT=";
 
+/// For an ssh target the script asks the sandbox's proxy itself and prints
+/// `MEZHA_PROBE_CONNECT <nonce> <code>`, the proxy's answer to `CONNECT
+/// host:port`: socat 1.8 says nothing when the proxy refuses. The nonce
+/// keeps a server from printing the line.
+pub const CONNECT_MARKER: &str = "MEZHA_PROBE_CONNECT";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The sandbox's proxy refused the connection: shown closed.
@@ -139,6 +145,20 @@ pub fn classify(output: &str, nonce: &str, scheme: Scheme, platform: Platform) -
         return Outcome::Inconclusive(
             "ssh fails inside srt on macOS whether or not the host is allowed".into(),
         );
+    }
+    // socat 1.8 exits without a word when the proxy refuses. The proxy's
+    // own 403 counts only when ssh stopped before the server spoke: the
+    // tunnel closed (`UNKNOWN port` is how ssh names a ProxyCommand peer)
+    // or the banner never came.
+    if scheme == Scheme::Ssh
+        && !nonce.is_empty()
+        && local
+            .iter()
+            .any(|l| *l == format!("{CONNECT_MARKER} {nonce} 403"))
+        && (has_local("Connection closed by UNKNOWN port")
+            || has_local("kex_exchange_identification: Connection closed"))
+    {
+        return Outcome::Blocked;
     }
     let why = if has_local("Could not resolve host") {
         "the host name didn't resolve, so the request skipped srt's proxy".to_string()
@@ -363,6 +383,81 @@ mod tests {
             classify(&nothing, NONCE, Scheme::Ssh, Platform::Linux),
             Outcome::Inconclusive("no known message".into())
         );
+    }
+
+    /// socat 1.8 (Ubuntu 24.04) exits without a word when srt's proxy
+    /// refuses; the probe's own question to the proxy decides then, as
+    /// long as ssh stopped before the server spoke.
+    #[test]
+    fn ssh_refused_by_the_proxy_without_a_word_from_socat() {
+        let marker = |code: &str| format!("{CONNECT_MARKER} {NONCE} {code}");
+        let silent = [
+            "Connection closed by UNKNOWN port 65535",
+            "fatal: Could not read from remote repository.",
+        ];
+        let ssh = |lines: &[&str], code: &str| {
+            let refused = marker(code);
+            let mut all = lines.to_vec();
+            all.push(&refused);
+            classify(&out(&all), NONCE, Scheme::Ssh, Platform::Linux)
+        };
+        assert_eq!(ssh(&silent, "403"), Outcome::Blocked);
+        assert_eq!(
+            ssh(
+                &["kex_exchange_identification: Connection closed by remote host"],
+                "403"
+            ),
+            Outcome::Blocked
+        );
+        // The proxy let the tunnel through, or didn't answer: no proof.
+        for code in ["200", "000", "none"] {
+            assert_eq!(
+                ssh(&silent, code),
+                Outcome::Inconclusive("fatal: Could not read from remote repository.".into()),
+                "{code}"
+            );
+        }
+        // ssh got further than the tunnel: the 403 doesn't explain it.
+        assert_eq!(
+            ssh(&["Host key verification failed."], "403"),
+            Outcome::ReachedNoAuth
+        );
+        assert!(matches!(
+            ssh(
+                &["ssh: connect to host github.com port 22: Connection timed out"],
+                "403"
+            ),
+            Outcome::Inconclusive(_)
+        ));
+        // Another nonce, or the line from a server, proves nothing.
+        let forged = format!("{CONNECT_MARKER} ffffffff 403");
+        let mut lines = silent.to_vec();
+        lines.push(&forged);
+        assert!(matches!(
+            classify(&out(&lines), NONCE, Scheme::Ssh, Platform::Linux),
+            Outcome::Inconclusive(_)
+        ));
+        let remote = format!("remote: {}", marker("403"));
+        let mut lines = silent.to_vec();
+        lines.push(&remote);
+        assert!(matches!(
+            classify(&out(&lines), NONCE, Scheme::Ssh, Platform::Linux),
+            Outcome::Inconclusive(_)
+        ));
+        // ssh on macOS stays inconclusive, and https has its own markers.
+        let refused = marker("403");
+        let mut lines = silent.to_vec();
+        lines.push(&refused);
+        assert_eq!(
+            classify(&out(&lines), NONCE, Scheme::Ssh, Platform::MacOs),
+            Outcome::Inconclusive(
+                "ssh fails inside srt on macOS whether or not the host is allowed".into()
+            )
+        );
+        assert!(matches!(
+            classify(&out(&lines), NONCE, Scheme::Https, Platform::Linux),
+            Outcome::Inconclusive(_)
+        ));
     }
 
     #[test]

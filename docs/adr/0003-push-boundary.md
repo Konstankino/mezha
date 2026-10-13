@@ -217,4 +217,11 @@ verify не запускає `srt`, `gh`, `git`, `node`, `claude`, `bwrap`, `soc
   - дає `--inside` пройти в справжньому sandbox.
 
   Локально, на macOS, вони пройшли.
-- У репозиторію поки немає remote, тож завдання запрацює після першого push.
+- Перший прогін у CI (2026-10-13): на `macos-15` усе пройшло, на `ubuntu-24.04` упав `srt_refuses_ssh_through_socat`.
+  - srt веде ssh через `ProxyCommand='socat - PROXY:localhost:%h:%p,…'`. socat 1.8.0.0 з Ubuntu 24.04 нічого не пише, коли проксі відмовляє в `CONNECT`, навіть на рівні notice. Старіші версії писали `E CONNECT github.com:22: Forbidden`.
+  - ssh бачить лише `Connection closed by UNKNOWN port 65535`. Так само виглядає й проксі, що не зміг зʼєднатися, тож саме по собі це не доказ.
+  - Сам проксі відповідає на `CONNECT github.com:22` кодом `403 Forbidden` із `X-Proxy-Error: blocked-by-allowlist`.
+- Тому для ssh-цілі скрипт проби після push питає проксі srt сам: `curl -q -p -x "$HTTPS_PROXY" telnet://host:port`, і друкує `MEZHA_PROBE_CONNECT <nonce> <код>`.
+  - Відмову класифікатор зараховує, лише коли код 403 і ssh зупинився до того, як сервер заговорив: `Connection closed by UNKNOWN port` або `kex_exchange_identification: Connection closed`.
+  - Nonce не дає серверу підробити цей рядок, а `-q` не дає `~/.curlrc` змінити запит.
+  - Без `curl` або без проксі ssh-ціль лишається «невідомо». На macOS ssh, як і раніше, «невідомо».

@@ -41,7 +41,9 @@ const WRAPPER: &str = "exec /bin/sh -c \"$MEZHA_PROBE_SCRIPT\"";
 
 /// The network probe. Inputs: `MEZHA_PROBE_GIT`, `_GIT_DIR`, `_URL`,
 /// `_NONCE`, `_FILE` (`never`, or `always` in tests), `_DRY_RUN`
-/// (`--dry-run`, or empty in tests), `_CAINFO`, `_CAPATH`.
+/// (`--dry-run`, or empty in tests), `_CAINFO`, `_CAPATH`, and `_CONNECT`:
+/// for an ssh target its `host:port`, which the script then asks the
+/// sandbox's proxy about with curl (see [`classify::CONNECT_MARKER`]).
 pub const NETWORK_SCRIPT: &str = r#"unset NO_PROXY no_proxy GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_SSH GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_WORK_TREE GIT_NAMESPACE GIT_EXEC_PATH
 for v in $(env | sed -n 's/^\(GIT_TRACE[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=never LC_ALL=C
@@ -53,6 +55,11 @@ if [ -n "$MEZHA_PROBE_CAINFO" ]; then set -- "$@" -c "http.sslCAInfo=$MEZHA_PROB
 if [ -n "$MEZHA_PROBE_CAPATH" ]; then set -- "$@" -c "http.sslCAPath=$MEZHA_PROBE_CAPATH"; fi
 "$MEZHA_PROBE_GIT" "$@" push $MEZHA_PROBE_DRY_RUN --no-verify --recurse-submodules=no "$MEZHA_PROBE_URL" ":mezha-probe-$MEZHA_PROBE_NONCE"
 echo "MEZHA_PROBE_EXIT=$?" >&2
+proxy=${HTTPS_PROXY:-${https_proxy:-}}
+if [ -n "$MEZHA_PROBE_CONNECT" ] && [ -n "$proxy" ] && command -v curl >/dev/null 2>&1; then
+  code=$(curl -q -s -o /dev/null -w '%{http_connect}' -p -x "$proxy" --connect-timeout 5 --max-time 5 "telnet://$MEZHA_PROBE_CONNECT" </dev/null 2>/dev/null)
+  echo "MEZHA_PROBE_CONNECT $MEZHA_PROBE_NONCE ${code:-none}" >&2
+fi
 "#;
 
 /// The credential probe. Inputs: `MEZHA_PROBE_FILES` and
@@ -304,6 +311,11 @@ fn network(
         let outcome = if left < Duration::from_secs(5) {
             Outcome::Inconclusive("the probe ran out of time".into())
         } else {
+            let connect = if target.scheme == crate::hosts::Scheme::Ssh {
+                target.endpoint.to_string()
+            } else {
+                String::new()
+            };
             let vars = [
                 ("MEZHA_PROBE_GIT", git_text.as_ref()),
                 ("MEZHA_PROBE_GIT_DIR", git_dir_text.as_ref()),
@@ -313,6 +325,7 @@ fn network(
                 ("MEZHA_PROBE_DRY_RUN", dry_run),
                 ("MEZHA_PROBE_CAINFO", ca.0.as_deref().unwrap_or("")),
                 ("MEZHA_PROBE_CAPATH", ca.1.as_deref().unwrap_or("")),
+                ("MEZHA_PROBE_CONNECT", connect.as_str()),
             ];
             match launch(
                 ctx,
@@ -741,6 +754,87 @@ mod tests {
         assert_eq!(label(&c, Path::new("/s/creds")), "/s/creds");
         let at_home = ctx(Some(Path::new("/h")), &[]);
         assert_eq!(label(&at_home, Path::new("/h/.netrc")), "~/.netrc");
+    }
+
+    /// For an ssh target the script asks the proxy with curl, and the
+    /// answer reaches the classifier; an https target doesn't ask, and
+    /// without a proxy nothing is asked. Stand-in git and curl.
+    #[cfg(unix)]
+    #[test]
+    fn ssh_targets_ask_the_proxy_with_curl() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = tmp.path().join("curl.log");
+        let tool = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        tool(
+            "git",
+            "case \"$*\" in\n\
+             *git@github.com*) echo 'Connection closed by UNKNOWN port 65535' >&2; echo 'fatal: Could not read from remote repository.' >&2; exit 128 ;;\n\
+             *https://*) echo \"fatal: unable to access 'https://github.com/o/r.git/': CONNECT tunnel failed, response 403\" >&2; exit 128 ;;\n\
+             esac\nexit 0\n",
+        );
+        tool(
+            "curl",
+            &format!("printf '%s\\n' \"$*\" >> '{}'\nprintf 403\n", log.display()),
+        );
+        let target = |scheme, port: u16, url: &str| Target {
+            scheme,
+            endpoint: crate::hosts::Endpoint {
+                host: "github.com".into(),
+                port,
+            },
+            url: url.into(),
+        };
+        let targets = [
+            target(crate::hosts::Scheme::Ssh, 22, "git@github.com:o/r.git"),
+            target(
+                crate::hosts::Scheme::Https,
+                443,
+                "https://github.com/o/r.git",
+            ),
+        ];
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let ctx = |vars: &[(&str, &str)]| Ctx {
+            // Not above `bin`: mezha runs nothing from inside the project.
+            root: tmp.path().join("repo"),
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            home: None,
+            platform: crate::ctx::Platform::Linux,
+            managed_dir: None,
+            mezha_exe: None,
+            agent_writable: Vec::new(),
+        };
+
+        let proxied = ctx(&[("PATH", &path), ("HTTPS_PROXY", "http://127.0.0.1:9")]);
+        let outcomes: Vec<Outcome> = network_here(&proxied, &targets, None)
+            .into_iter()
+            .map(|r| r.outcome)
+            .collect();
+        assert_eq!(outcomes, [Outcome::Blocked, Outcome::Blocked]);
+        let asked = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            asked,
+            "-q -s -o /dev/null -w %{http_connect} -p -x http://127.0.0.1:9 --connect-timeout 5 --max-time 5 telnet://github.com:22\n"
+        );
+
+        // Without a proxy there is nobody to ask: ssh says too little.
+        std::fs::remove_file(&log).unwrap();
+        let direct = ctx(&[("PATH", &path)]);
+        let ssh = network_here(&direct, &targets[..1], None);
+        assert_eq!(
+            ssh[0].outcome,
+            Outcome::Inconclusive("fatal: Could not read from remote repository.".into())
+        );
+        assert!(!log.exists());
     }
 
     #[cfg(unix)]

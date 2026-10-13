@@ -125,7 +125,10 @@ It needs, on macOS and Linux only:
 - Node 22.12 or later and `npm i -g @anthropic-ai/sandbox-runtime@0.0.79`;
 - on Linux, also `bwrap`, `socat` and `rg`, and on Ubuntu 24.04 and later
   unprivileged user namespaces for bwrap
-  (`kernel.apparmor_restrict_unprivileged_userns`).
+  (`kernel.apparmor_restrict_unprivileged_userns`);
+- on Linux, for an ssh push remote, `curl`: socat 1.8 says nothing when
+  srt's proxy refuses the host, so the probe asks the proxy itself, and
+  without curl the remote stays inconclusive.
 
 Without a usable `srt`, verify exits 2 and says why. Run it from your own
 terminal. Inside Claude Code it works only from a `!` command, which runs

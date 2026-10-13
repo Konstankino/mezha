@@ -1766,14 +1766,17 @@ started with the sandbox settings as mezha reads them:
 - a `git push --dry-run` to each push remote that deletes a ref that
   doesn't exist (`:mezha-probe-<nonce>`), from a scratch repository with no
   config, no credential helper and no hooks, capped at 60 seconds. Nothing
-  is ever sent;
+  is ever sent. For an ssh remote it also asks srt's proxy, with curl,
+  whether it lets `CONNECT host:22` through: socat 1.8 says nothing when
+  the proxy refuses, and only that 403 shows the refusal;
 - which credential files a sandboxed command can read and which token
   variables it sees (indices only, never contents).
 
 `push-boundary` then says "shown closed in srt" or "shown in srt". Needs
 macOS or Linux, Node 22.12+ and `npm i -g @anthropic-ai/sandbox-runtime@0.0.79`
-(on Linux also `bwrap`, `socat`, `rg`). It can't see the macOS keychain, how
-Claude Code itself merges settings, or ssh on macOS.
+(on Linux also `bwrap`, `socat`, `rg`, and `curl` for an ssh remote). It
+can't see the macOS keychain, how Claude Code itself merges settings, or
+ssh on macOS.
 
 ### 21.2 `--inside`: from the session's own sandbox
 
