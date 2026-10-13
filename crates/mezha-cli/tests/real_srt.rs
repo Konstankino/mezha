@@ -179,11 +179,44 @@ fn srt_refuses_ssh_through_socat() {
     }
     let p = project("", "git@github.com:anthropics/sandbox-runtime.git");
     let r = verify_json(&p, &["--probe"], &[]);
-    assert!(
-        detail(&r, "push-boundary").contains("github.com:22 refused by the sandbox proxy"),
-        "{}",
-        detail(&r, "push-boundary")
-    );
+    let text = detail(&r, "push-boundary");
+    if !text.contains("github.com:22 refused by the sandbox proxy") {
+        panic!("{text}\n\nssh inside srt, by hand:\n{}", ssh_inside_srt(&p));
+    }
+}
+
+/// What ssh says inside srt when it reaches github.com, for a failure
+/// message: the probe's report carries only its verdict. Proxy
+/// credentials in `GIT_SSH_COMMAND` are masked.
+#[cfg(target_os = "linux")]
+fn ssh_inside_srt(p: &Project) -> String {
+    const SCRIPT: &str = r#"printf 'GIT_SSH_COMMAND=%s\n' "${GIT_SSH_COMMAND-(unset)}" | sed "s/proxyauth=[^,' ]*/proxyauth=***/g"
+env | sed -n 's/^\([A-Za-z_]*[Pp][Rr][Oo][Xx][Yy][A-Za-z_]*\)=.*/\1 is set/p'
+socat -V 2>&1 | sed -n 2p
+GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=10" git ls-remote git@github.com:anthropics/sandbox-runtime.git 2>&1
+echo "exit $?""#;
+    // srt points TMPDIR at /tmp/claude but doesn't create it.
+    fs::create_dir_all("/tmp/claude").unwrap();
+    let settings = p.base.join("srt-ssh-settings.json");
+    fs::write(&settings, settings_from_project(p).to_string()).unwrap();
+    let mut cmd = Command::new("srt");
+    cmd.args(["--settings", &settings.display().to_string(), "-c", SCRIPT])
+        .current_dir(&p.root)
+        .env_clear()
+        .env("HOME", &p.home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    match cmd.output() {
+        Ok(out) => format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(e) => format!("srt didn't start: {e}"),
+    }
 }
 
 /// srt settings close to what Claude Code builds from the project's
